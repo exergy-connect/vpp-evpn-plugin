@@ -1,15 +1,15 @@
 # Build the EVPN plugin against FD.io VPP (matches lab image: debian bookworm).
 #
-#   docker build -t exergy/vpp-with-evpn-plugin .
-#   docker build -t exergy/vpp-with-evpn-plugin --build-arg VPP_VERSION=25.06-release .
+#   docker build -t ghcr.io/exergy-connect/vpp-with-evpn-plugin .
+#   docker build -t ghcr.io/exergy-connect/vpp-with-evpn-plugin --build-arg VPP_VERSION=25.06-release .
 #
 # Extract the .so:
-#   docker create --name evpn-tmp exergy/vpp-with-evpn-plugin
+#   docker create --name evpn-tmp ghcr.io/exergy-connect/vpp-with-evpn-plugin
 #   docker cp evpn-tmp:/usr/lib/x86_64-linux-gnu/vpp_plugins/evpn_plugin.so .
 #   docker rm evpn-tmp
 #
 # Or run VPP with the plugin already installed:
-#   docker run --rm -it --privileged exergy/vpp-with-evpn-plugin
+#   docker run --rm -it --privileged ghcr.io/exergy-connect/vpp-with-evpn-plugin
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG REPO=release

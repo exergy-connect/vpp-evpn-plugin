@@ -10,10 +10,10 @@ PLUGIN_LINK = $(VPP_DIR)/src/plugins/evpn
 .PHONY: link build external clean docker docker-so
 
 docker:
-	docker build -t exergy/vpp-with-evpn-plugin .
+	docker build -t ghcr.io/exergy-connect/vpp-with-evpn-plugin .
 
 docker-so: docker
-	@id=$$(docker create exergy/vpp-with-evpn-plugin); \
+	@id=$$(docker create ghcr.io/exergy-connect/vpp-with-evpn-plugin); \
 	docker cp "$$id":/usr/lib/x86_64-linux-gnu/vpp_plugins/evpn_plugin.so ./evpn_plugin.so \
 	  || docker cp "$$id":/usr/lib/vpp_plugins/evpn_plugin.so ./evpn_plugin.so; \
 	docker rm "$$id"; \
