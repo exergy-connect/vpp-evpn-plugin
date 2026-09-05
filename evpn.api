@@ -7,10 +7,18 @@
  * a userspace agent translates EVPN RIB ↔ these messages.
  */
 
-option version = "0.2.0";
+option version = "0.4.0";
 
 import "vnet/ip/ip_types.api";
 import "vnet/ethernet/ethernet_types.api";
+
+/* How IPv4 Type-5 prefixes choose the L3-BVI overlay next hop. */
+enum evpn_ipv4_nh_mode : u8
+{
+  EVPN_API_IPV4_NH_AUTO = 0,
+  EVPN_API_IPV4_NH_IPV4 = 1,
+  EVPN_API_IPV4_NH_IPV6 = 2,
+};
 
 /* Register an existing BD and (when irb) its existing BVI.
  * router_mac, when nonzero, must match the BVI. Delete preserves infrastructure. */
@@ -27,7 +35,9 @@ autoreply define evpn_evi_add_del
 };
 
 /* Register existing table(s), BD 10000 + table_id, and its bound BVI.
- * Withdraw prefixes before unregistering. No infrastructure is provisioned. */
+ * Withdraw prefixes before unregistering. No infrastructure is provisioned.
+ * ipv4_nh_mode: auto (default) uses IPv6 overlay NH when the L3 BVI has no
+ * IPv4 address (RFC 8950-style); ipv4 forces 169.254; ipv6 forces fd00:a9fe::. */
 autoreply define evpn_vrf_add_del
 {
   u32 client_index;
@@ -36,6 +46,7 @@ autoreply define evpn_vrf_add_del
   u32 table_id;
   u32 l3_vni;
   vl_api_mac_address_t router_mac;
+  vl_api_evpn_ipv4_nh_mode_t ipv4_nh_mode [default=0];
 };
 
 autoreply define evpn_vtep_add_del

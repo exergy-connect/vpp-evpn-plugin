@@ -14,6 +14,7 @@ GW_MAC = '02:00:ca:fe:00:ff'
 EXTRA_MAC = 'aa:bb:cc:dd:ee:ff'
 HOST_MAC = '00:00:00:00:00:22'
 VIP = '172.16.10.1'
+VIP6 = '2001:db8:10::1'
 
 
 def cli(command, fails=False):
@@ -77,6 +78,8 @@ cli('set interface unnumbered bvi10001 use loop10001')
 cli('set interface state bvi10001 up')
 cli('set interface ip table bvi10 1')
 cli(f'set interface ip address bvi10 {VIP}/24')
+cli('set interface ip6 table bvi10 1')
+cli(f'set interface ip address bvi10 {VIP6}/64')
 
 cli('evpn evi add evi 10 vni 10010 bd 10 irb')
 cli('evpn vtep add local 10.0.0.1 remote 10.0.0.2')
@@ -86,6 +89,7 @@ cli('evpn logging level debug')
 show = cli('show evpn evi')
 assert 'src bvi' in show, show
 assert VIP in show, show
+assert VIP6 in show, show
 assert GW_MAC in show.lower() or '02:00:ca:fe:00:ff' in show.lower(), show
 
 # Remote Type-2 for the anycast MAC must not steal the BVI FDB.
@@ -94,6 +98,12 @@ assert_on_bvi(GW_MAC, 'after remote Type-2 of GW MAC')
 neigh = cli('show ip neighbors')
 # Local VIP neighbor / connected must not be replaced by remote static.
 assert 'vxlan' not in neigh.lower()
+
+# IPv6 VIP Type-2 must likewise leave the gateway MAC on the BVI.
+cli(f'evpn mac add evi 10 mac {GW_MAC} ip {VIP6} remote 10.0.0.2')
+assert_on_bvi(GW_MAC, 'after remote Type-2 of GW MAC + IPv6 VIP')
+neigh6 = cli('show ip6 neighbors')
+assert not re.search(rf'{re.escape(VIP6)}\s+S\s+', neigh6), neigh6
 
 # Host Type-2 still installs to VXLAN.
 cli(f'evpn mac add evi 10 mac {HOST_MAC} ip 172.16.10.22 remote 10.0.0.2')
@@ -115,4 +125,10 @@ neigh = cli('show ip neighbors')
 # Static neighbor for VIP with foreign MAC should have been skipped.
 assert not re.search(rf'{VIP}\s+S\s+{FOREIGN}', neigh), neigh
 
-print('PASS: anycast BVI/VIP protected, extra l2fib-bvi protected, host Type-2 ok')
+FOREIGN6 = '00:11:22:33:44:66'
+cli(f'evpn mac add evi 10 mac {FOREIGN6} ip {VIP6} remote 10.0.0.2')
+assert_on_vxlan(FOREIGN6, 'foreign MAC + IPv6 VIP still gets FDB')
+neigh6 = cli('show ip6 neighbors')
+assert not re.search(rf'{re.escape(VIP6)}\s+S\s+{FOREIGN6}', neigh6, re.I), neigh6
+
+print('PASS: anycast BVI/VIP(+IPv6) protected, extra l2fib-bvi protected, host Type-2 ok')

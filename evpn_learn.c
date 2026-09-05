@@ -571,27 +571,75 @@ evpn_nl_parse_attrs (struct rtattr *rta, int len, struct rtattr **tb,
     }
 }
 
-static void
-evpn_kernel_neigh_set (u32 ip, const u8 * ll)
+static u64
+evpn_pack_ll (const u8 * ll)
 {
-  evpn_main_t *em = &evpn_main;
-  u64 packed;
-
-  packed = ((u64) ll[0] << 40) | ((u64) ll[1] << 32) | ((u64) ll[2] << 24) |
+  return ((u64) ll[0] << 40) | ((u64) ll[1] << 32) | ((u64) ll[2] << 24) |
     ((u64) ll[3] << 16) | ((u64) ll[4] << 8) | (u64) ll[5];
-  hash_set (em->kernel_neigh, ip, packed);
 }
 
 static void
-evpn_kernel_neigh_unset (u32 ip)
+evpn_unpack_ll (u64 packed, mac_address_t * mac)
 {
-  hash_unset (evpn_main.kernel_neigh, ip);
+  mac->bytes[0] = (packed >> 40) & 0xff;
+  mac->bytes[1] = (packed >> 32) & 0xff;
+  mac->bytes[2] = (packed >> 24) & 0xff;
+  mac->bytes[3] = (packed >> 16) & 0xff;
+  mac->bytes[4] = (packed >> 8) & 0xff;
+  mac->bytes[5] = packed & 0xff;
 }
 
-static uword *
-evpn_kernel_neigh_macs (u8 * buf)
+static uword
+evpn_ip6_hash_key (const u8 * addr)
 {
-  uword *macs = 0;
+  return hash_memory ((void *) addr, 16, 0);
+}
+
+static int
+evpn_is_overlay_nh4 (u32 dst_net, u8 plen)
+{
+  return (plen >= 16 &&
+	  (clib_net_to_host_u32 (dst_net) & 0xffff0000) == 0xa9fe0000);
+}
+
+static int
+evpn_is_overlay_nh6 (const u8 * addr6, u8 plen)
+{
+  /* fd00:a9fe::/64 */
+  u32 w0 = clib_net_to_host_u32 (*(const u32 *) addr6);
+  u32 w1 = clib_net_to_host_u32 (*(const u32 *) (addr6 + 4));
+  return (plen >= 64 && w0 == EVPN_OVERLAY_NH6_WORD0_HOST &&
+	  w1 == EVPN_OVERLAY_NH6_WORD1_HOST);
+}
+
+static void
+evpn_kernel_neigh4_set (u32 ip, const u8 * ll)
+{
+  hash_set (evpn_main.kernel_neigh4, ip, evpn_pack_ll (ll));
+}
+
+static void
+evpn_kernel_neigh4_unset (u32 ip)
+{
+  hash_unset (evpn_main.kernel_neigh4, ip);
+}
+
+static void
+evpn_kernel_neigh6_set (const u8 * addr, const u8 * ll)
+{
+  hash_set (evpn_main.kernel_neigh6, evpn_ip6_hash_key (addr),
+	    evpn_pack_ll (ll));
+}
+
+static void
+evpn_kernel_neigh6_unset (const u8 * addr)
+{
+  hash_unset (evpn_main.kernel_neigh6, evpn_ip6_hash_key (addr));
+}
+
+static void
+evpn_kernel_neigh_ingest (u8 * buf, u8 family)
+{
   unsigned len = vec_len (buf);
   struct nlmsghdr *nh = (struct nlmsghdr *) buf;
 
@@ -599,29 +647,34 @@ evpn_kernel_neigh_macs (u8 * buf)
     {
       struct ndmsg *ndm;
       struct rtattr *tb[NDA_MAX + 1];
-      u32 ip;
       u8 *ll;
-      u64 packed;
 
       if (nh->nlmsg_type != RTM_NEWNEIGH)
 	continue;
       ndm = NLMSG_DATA (nh);
-      if (ndm->ndm_family != AF_INET)
+      if (ndm->ndm_family != family)
 	continue;
       evpn_nl_parse_attrs (NDA_RTA (ndm),
 			   nh->nlmsg_len - NLMSG_LENGTH (sizeof (*ndm)), tb,
 			   NDA_MAX);
       if (!tb[NDA_DST] || !tb[NDA_LLADDR])
 	continue;
-      if (RTA_PAYLOAD (tb[NDA_DST]) < 4 || RTA_PAYLOAD (tb[NDA_LLADDR]) < 6)
+      if (RTA_PAYLOAD (tb[NDA_LLADDR]) < 6)
 	continue;
-      ip = *(u32 *) RTA_DATA (tb[NDA_DST]);
       ll = RTA_DATA (tb[NDA_LLADDR]);
-      packed = ((u64) ll[0] << 40) | ((u64) ll[1] << 32) | ((u64) ll[2] << 24) |
-	((u64) ll[3] << 16) | ((u64) ll[4] << 8) | (u64) ll[5];
-      hash_set (macs, ip, packed);
+      if (family == AF_INET)
+	{
+	  if (RTA_PAYLOAD (tb[NDA_DST]) < 4)
+	    continue;
+	  evpn_kernel_neigh4_set (*(u32 *) RTA_DATA (tb[NDA_DST]), ll);
+	}
+      else if (family == AF_INET6)
+	{
+	  if (RTA_PAYLOAD (tb[NDA_DST]) < 16)
+	    continue;
+	  evpn_kernel_neigh6_set (RTA_DATA (tb[NDA_DST]), ll);
+	}
     }
-  return macs;
 }
 
 static int
@@ -648,7 +701,10 @@ evpn_kernel_install_prefix (evpn_vrf_t * v, fib_prefix_t * pfx,
       return;
     }
   key = v->table_id;
-  key ^= pfx->fp_addr.ip4.as_u32 ^ ((uword) pfx->fp_len << 8);
+  if (pfx->fp_proto == FIB_PROTOCOL_IP4)
+    key ^= pfx->fp_addr.ip4.as_u32 ^ ((uword) pfx->fp_len << 8);
+  else
+    key ^= hash_memory (pfx->fp_addr.ip6.as_u8, 16, pfx->fp_len);
   p = hash_get (em->prefix_by_key, key);
   if (!p)
     return;
@@ -860,57 +916,19 @@ evpn_gw_scan_macvlan (void)
 }
 
 static void
-evpn_learn_scan_kernel_routes (void)
+evpn_learn_apply_kernel_route_buf (u8 * rbuf, u8 family, u32 gen)
 {
   evpn_main_t *em = &evpn_main;
-  int sock;
-  u8 *rbuf = 0, *nbuf = 0;
-  uword *neigh = 0;
-  u32 gen;
-  struct nlmsghdr *nh;
-  unsigned len;
-  evpn_prefix_t *pr;
-  u32 *to_del = 0;
-  u32 i;
+  unsigned len = vec_len (rbuf);
+  struct nlmsghdr *nh = (struct nlmsghdr *) rbuf;
 
-  if (pool_elts (em->vrfs) == 0)
-    return;
-
-  sock = (em->nl_fd >= 0) ? em->nl_fd : evpn_nl_open_dataplane ();
-  if (sock < 0)
-    return;
-  if (evpn_nl_dump (sock, RTM_GETNEIGH, AF_INET, &nbuf) ||
-      evpn_nl_dump (sock, RTM_GETROUTE, AF_INET, &rbuf))
-    {
-      if (sock != em->nl_fd)
-	close (sock);
-      vec_free (nbuf);
-      vec_free (rbuf);
-      return;
-    }
-  if (sock != em->nl_fd)
-    close (sock);
-
-  gen = ++em->kernel_route_gen;
-  neigh = evpn_kernel_neigh_macs (nbuf);
-  vec_free (nbuf);
-
-  /* Refresh live neigh cache from dump. */
-  hash_free (em->kernel_neigh);
-  em->kernel_neigh = neigh;
-  neigh = 0;
-
-  len = vec_len (rbuf);
-  nh = (struct nlmsghdr *) rbuf;
   for (; NLMSG_OK (nh, len); nh = NLMSG_NEXT (nh, len))
     {
       struct rtmsg *rtm;
       struct rtattr *tb[RTA_MAX + 1];
-      u32 table, via, dst;
-      u8 plen;
-      uword *mp;
+      u32 table;
+      uword *mp, *vp;
       evpn_vrf_t *v;
-      uword *vp;
       fib_prefix_t pfx;
       ip46_address_t remote;
       mac_address_t rmac;
@@ -919,7 +937,7 @@ evpn_learn_scan_kernel_routes (void)
       if (nh->nlmsg_type != RTM_NEWROUTE)
 	continue;
       rtm = NLMSG_DATA (nh);
-      if (rtm->rtm_family != AF_INET || rtm->rtm_type != RTN_UNICAST)
+      if (rtm->rtm_family != family || rtm->rtm_type != RTN_UNICAST)
 	continue;
       if (!evpn_proto_is_control_plane (rtm->rtm_protocol))
 	continue;
@@ -935,35 +953,106 @@ evpn_learn_scan_kernel_routes (void)
       v = pool_elt_at_index (em->vrfs, vp[0]);
       if (!tb[RTA_DST] || !tb[RTA_GATEWAY])
 	continue;
-      if (RTA_PAYLOAD (tb[RTA_DST]) < 4 || RTA_PAYLOAD (tb[RTA_GATEWAY]) < 4)
-	continue;
-      dst = *(u32 *) RTA_DATA (tb[RTA_DST]);
-      via = *(u32 *) RTA_DATA (tb[RTA_GATEWAY]);
-      plen = rtm->rtm_dst_len;
-      if (em->have_default_local && !em->default_local_is_ip6 &&
-	  via == em->default_local.ip4.as_u32)
-	continue;
-      if (plen >= 16 && (clib_net_to_host_u32 (dst) & 0xffff0000) == 0xa9fe0000)
-	continue;
-      mp = hash_get (em->kernel_neigh, via);
-      if (!mp)
-	continue;
-      packed = mp[0];
-      rmac.bytes[0] = (packed >> 40) & 0xff;
-      rmac.bytes[1] = (packed >> 32) & 0xff;
-      rmac.bytes[2] = (packed >> 24) & 0xff;
-      rmac.bytes[3] = (packed >> 16) & 0xff;
-      rmac.bytes[4] = (packed >> 8) & 0xff;
-      rmac.bytes[5] = packed & 0xff;
-      clib_memset (&remote, 0, sizeof (remote));
-      remote.ip4.as_u32 = via;
+
       clib_memset (&pfx, 0, sizeof (pfx));
-      pfx.fp_proto = FIB_PROTOCOL_IP4;
-      pfx.fp_len = plen;
-      pfx.fp_addr.ip4.as_u32 = dst;
+      clib_memset (&remote, 0, sizeof (remote));
+      pfx.fp_len = rtm->rtm_dst_len;
+
+      if (family == AF_INET)
+	{
+	  u32 dst, via;
+	  if (RTA_PAYLOAD (tb[RTA_DST]) < 4 ||
+	      RTA_PAYLOAD (tb[RTA_GATEWAY]) < 4)
+	    continue;
+	  dst = *(u32 *) RTA_DATA (tb[RTA_DST]);
+	  via = *(u32 *) RTA_DATA (tb[RTA_GATEWAY]);
+	  if (em->have_default_local && !em->default_local_is_ip6 &&
+	      via == em->default_local.ip4.as_u32)
+	    continue;
+	  if (evpn_is_overlay_nh4 (dst, pfx.fp_len))
+	    continue;
+	  mp = hash_get (em->kernel_neigh4, via);
+	  if (!mp)
+	    continue;
+	  packed = mp[0];
+	  remote.ip4.as_u32 = via;
+	  pfx.fp_proto = FIB_PROTOCOL_IP4;
+	  pfx.fp_addr.ip4.as_u32 = dst;
+	}
+      else
+	{
+	  u8 *dst, *via;
+	  if (RTA_PAYLOAD (tb[RTA_DST]) < 16 ||
+	      RTA_PAYLOAD (tb[RTA_GATEWAY]) < 16)
+	    continue;
+	  dst = RTA_DATA (tb[RTA_DST]);
+	  via = RTA_DATA (tb[RTA_GATEWAY]);
+	  if (em->have_default_local && em->default_local_is_ip6 &&
+	      !memcmp (via, em->default_local.ip6.as_u8, 16))
+	    continue;
+	  if (evpn_is_overlay_nh6 (dst, pfx.fp_len))
+	    continue;
+	  mp = hash_get (em->kernel_neigh6, evpn_ip6_hash_key (via));
+	  if (!mp)
+	    continue;
+	  packed = mp[0];
+	  clib_memcpy (remote.ip6.as_u8, via, 16);
+	  pfx.fp_proto = FIB_PROTOCOL_IP6;
+	  clib_memcpy (pfx.fp_addr.ip6.as_u8, dst, 16);
+	}
+
+      evpn_unpack_ll (packed, &rmac);
       evpn_kernel_install_prefix (v, &pfx, &remote, &rmac, gen);
     }
-  vec_free (rbuf);
+}
+
+static void
+evpn_learn_scan_kernel_routes (void)
+{
+  evpn_main_t *em = &evpn_main;
+  int sock;
+  u8 *rbuf4 = 0, *nbuf4 = 0, *rbuf6 = 0, *nbuf6 = 0;
+  u32 gen;
+  evpn_prefix_t *pr;
+  u32 *to_del = 0;
+  u32 i;
+
+  if (pool_elts (em->vrfs) == 0)
+    return;
+
+  sock = (em->nl_fd >= 0) ? em->nl_fd : evpn_nl_open_dataplane ();
+  if (sock < 0)
+    return;
+  if (evpn_nl_dump (sock, RTM_GETNEIGH, AF_INET, &nbuf4) ||
+      evpn_nl_dump (sock, RTM_GETROUTE, AF_INET, &rbuf4) ||
+      evpn_nl_dump (sock, RTM_GETNEIGH, AF_INET6, &nbuf6) ||
+      evpn_nl_dump (sock, RTM_GETROUTE, AF_INET6, &rbuf6))
+    {
+      if (sock != em->nl_fd)
+	close (sock);
+      vec_free (nbuf4);
+      vec_free (rbuf4);
+      vec_free (nbuf6);
+      vec_free (rbuf6);
+      return;
+    }
+  if (sock != em->nl_fd)
+    close (sock);
+
+  gen = ++em->kernel_route_gen;
+  hash_free (em->kernel_neigh4);
+  hash_free (em->kernel_neigh6);
+  em->kernel_neigh4 = hash_create (0, sizeof (uword));
+  em->kernel_neigh6 = hash_create (0, sizeof (uword));
+  evpn_kernel_neigh_ingest (nbuf4, AF_INET);
+  evpn_kernel_neigh_ingest (nbuf6, AF_INET6);
+  vec_free (nbuf4);
+  vec_free (nbuf6);
+
+  evpn_learn_apply_kernel_route_buf (rbuf4, AF_INET, gen);
+  evpn_learn_apply_kernel_route_buf (rbuf6, AF_INET6, gen);
+  vec_free (rbuf4);
+  vec_free (rbuf6);
 
   pool_foreach (pr, em->prefixes)
   {
@@ -983,26 +1072,48 @@ evpn_nl_handle_neigh (struct nlmsghdr *nh)
 {
   struct ndmsg *ndm = NLMSG_DATA (nh);
   struct rtattr *tb[NDA_MAX + 1];
-  u32 ip;
   u8 *ll;
 
-  if (ndm->ndm_family != AF_INET)
+  if (ndm->ndm_family != AF_INET && ndm->ndm_family != AF_INET6)
     return;
   evpn_nl_parse_attrs (NDA_RTA (ndm),
 		       nh->nlmsg_len - NLMSG_LENGTH (sizeof (*ndm)), tb,
 		       NDA_MAX);
-  if (!tb[NDA_DST] || RTA_PAYLOAD (tb[NDA_DST]) < 4)
+  if (!tb[NDA_DST])
     return;
-  ip = *(u32 *) RTA_DATA (tb[NDA_DST]);
-  if (nh->nlmsg_type == RTM_DELNEIGH)
+
+  if (ndm->ndm_family == AF_INET)
     {
-      evpn_kernel_neigh_unset (ip);
-      return;
+      u32 ip;
+      if (RTA_PAYLOAD (tb[NDA_DST]) < 4)
+	return;
+      ip = *(u32 *) RTA_DATA (tb[NDA_DST]);
+      if (nh->nlmsg_type == RTM_DELNEIGH)
+	{
+	  evpn_kernel_neigh4_unset (ip);
+	  return;
+	}
+      if (!tb[NDA_LLADDR] || RTA_PAYLOAD (tb[NDA_LLADDR]) < 6)
+	return;
+      ll = RTA_DATA (tb[NDA_LLADDR]);
+      evpn_kernel_neigh4_set (ip, ll);
     }
-  if (!tb[NDA_LLADDR] || RTA_PAYLOAD (tb[NDA_LLADDR]) < 6)
-    return;
-  ll = RTA_DATA (tb[NDA_LLADDR]);
-  evpn_kernel_neigh_set (ip, ll);
+  else
+    {
+      u8 *addr;
+      if (RTA_PAYLOAD (tb[NDA_DST]) < 16)
+	return;
+      addr = RTA_DATA (tb[NDA_DST]);
+      if (nh->nlmsg_type == RTM_DELNEIGH)
+	{
+	  evpn_kernel_neigh6_unset (addr);
+	  return;
+	}
+      if (!tb[NDA_LLADDR] || RTA_PAYLOAD (tb[NDA_LLADDR]) < 6)
+	return;
+      ll = RTA_DATA (tb[NDA_LLADDR]);
+      evpn_kernel_neigh6_set (addr, ll);
+    }
 }
 
 static void
@@ -1011,8 +1122,7 @@ evpn_nl_handle_route (struct nlmsghdr *nh)
   evpn_main_t *em = &evpn_main;
   struct rtmsg *rtm = NLMSG_DATA (nh);
   struct rtattr *tb[RTA_MAX + 1];
-  u32 table, via, dst;
-  u8 plen;
+  u32 table;
   uword *mp, *vp;
   evpn_vrf_t *v;
   fib_prefix_t pfx;
@@ -1020,7 +1130,8 @@ evpn_nl_handle_route (struct nlmsghdr *nh)
   mac_address_t rmac;
   u64 packed;
 
-  if (rtm->rtm_family != AF_INET || rtm->rtm_type != RTN_UNICAST)
+  if ((rtm->rtm_family != AF_INET && rtm->rtm_family != AF_INET6) ||
+      rtm->rtm_type != RTN_UNICAST)
     return;
   if (!evpn_proto_is_control_plane (rtm->rtm_protocol))
     return;
@@ -1036,10 +1147,21 @@ evpn_nl_handle_route (struct nlmsghdr *nh)
   v = pool_elt_at_index (em->vrfs, vp[0]);
 
   clib_memset (&pfx, 0, sizeof (pfx));
-  pfx.fp_proto = FIB_PROTOCOL_IP4;
+  clib_memset (&remote, 0, sizeof (remote));
   pfx.fp_len = rtm->rtm_dst_len;
-  if (tb[RTA_DST] && RTA_PAYLOAD (tb[RTA_DST]) >= 4)
-    pfx.fp_addr.ip4.as_u32 = *(u32 *) RTA_DATA (tb[RTA_DST]);
+
+  if (rtm->rtm_family == AF_INET)
+    {
+      pfx.fp_proto = FIB_PROTOCOL_IP4;
+      if (tb[RTA_DST] && RTA_PAYLOAD (tb[RTA_DST]) >= 4)
+	pfx.fp_addr.ip4.as_u32 = *(u32 *) RTA_DATA (tb[RTA_DST]);
+    }
+  else
+    {
+      pfx.fp_proto = FIB_PROTOCOL_IP6;
+      if (tb[RTA_DST] && RTA_PAYLOAD (tb[RTA_DST]) >= 16)
+	clib_memcpy (pfx.fp_addr.ip6.as_u8, RTA_DATA (tb[RTA_DST]), 16);
+    }
 
   if (nh->nlmsg_type == RTM_DELROUTE)
     {
@@ -1049,30 +1171,47 @@ evpn_nl_handle_route (struct nlmsghdr *nh)
 
   if (!tb[RTA_DST] || !tb[RTA_GATEWAY])
     return;
-  if (RTA_PAYLOAD (tb[RTA_DST]) < 4 || RTA_PAYLOAD (tb[RTA_GATEWAY]) < 4)
-    return;
-  dst = *(u32 *) RTA_DATA (tb[RTA_DST]);
-  via = *(u32 *) RTA_DATA (tb[RTA_GATEWAY]);
-  plen = rtm->rtm_dst_len;
-  if (em->have_default_local && !em->default_local_is_ip6 &&
-      via == em->default_local.ip4.as_u32)
-    return;
-  if (plen >= 16 && (clib_net_to_host_u32 (dst) & 0xffff0000) == 0xa9fe0000)
-    return;
-  mp = hash_get (em->kernel_neigh, via);
-  if (!mp)
-    return;
-  packed = mp[0];
-  rmac.bytes[0] = (packed >> 40) & 0xff;
-  rmac.bytes[1] = (packed >> 32) & 0xff;
-  rmac.bytes[2] = (packed >> 24) & 0xff;
-  rmac.bytes[3] = (packed >> 16) & 0xff;
-  rmac.bytes[4] = (packed >> 8) & 0xff;
-  rmac.bytes[5] = packed & 0xff;
-  clib_memset (&remote, 0, sizeof (remote));
-  remote.ip4.as_u32 = via;
-  pfx.fp_len = plen;
-  pfx.fp_addr.ip4.as_u32 = dst;
+
+  if (rtm->rtm_family == AF_INET)
+    {
+      u32 dst, via;
+      if (RTA_PAYLOAD (tb[RTA_DST]) < 4 || RTA_PAYLOAD (tb[RTA_GATEWAY]) < 4)
+	return;
+      dst = *(u32 *) RTA_DATA (tb[RTA_DST]);
+      via = *(u32 *) RTA_DATA (tb[RTA_GATEWAY]);
+      if (em->have_default_local && !em->default_local_is_ip6 &&
+	  via == em->default_local.ip4.as_u32)
+	return;
+      if (evpn_is_overlay_nh4 (dst, pfx.fp_len))
+	return;
+      mp = hash_get (em->kernel_neigh4, via);
+      if (!mp)
+	return;
+      packed = mp[0];
+      remote.ip4.as_u32 = via;
+      pfx.fp_addr.ip4.as_u32 = dst;
+    }
+  else
+    {
+      u8 *dst, *via;
+      if (RTA_PAYLOAD (tb[RTA_DST]) < 16 || RTA_PAYLOAD (tb[RTA_GATEWAY]) < 16)
+	return;
+      dst = RTA_DATA (tb[RTA_DST]);
+      via = RTA_DATA (tb[RTA_GATEWAY]);
+      if (em->have_default_local && em->default_local_is_ip6 &&
+	  !memcmp (via, em->default_local.ip6.as_u8, 16))
+	return;
+      if (evpn_is_overlay_nh6 (dst, pfx.fp_len))
+	return;
+      mp = hash_get (em->kernel_neigh6, evpn_ip6_hash_key (via));
+      if (!mp)
+	return;
+      packed = mp[0];
+      clib_memcpy (remote.ip6.as_u8, via, 16);
+      clib_memcpy (pfx.fp_addr.ip6.as_u8, dst, 16);
+    }
+
+  evpn_unpack_ll (packed, &rmac);
   evpn_kernel_install_prefix (v, &pfx, &remote, &rmac, em->kernel_route_gen);
 }
 
@@ -1347,7 +1486,8 @@ evpn_nl_socket_open (void)
       return -1;
     }
 
-  groups = RTMGRP_IPV4_ROUTE | RTMGRP_NEIGH | RTMGRP_LINK | RTMGRP_IPV4_IFADDR;
+  groups = RTMGRP_IPV4_ROUTE | RTMGRP_IPV6_ROUTE | RTMGRP_NEIGH |
+    RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR;
   clib_memset (&sa, 0, sizeof (sa));
   sa.nl_family = AF_NETLINK;
   sa.nl_groups = groups;
@@ -1433,6 +1573,72 @@ VLIB_REGISTER_NODE (evpn_learn_process_node) = {
   .name = "evpn-learn-process",
 };
 
+static void
+evpn_ip6_address_cb (ip6_main_t * im, uword opaque, u32 sw_if_index,
+		     ip6_address_t * address, u32 address_length,
+		     u32 if_address_index, u32 is_del)
+{
+  evpn_main_t *em = &evpn_main;
+  evpn_evi_t *e;
+  evpn_vrf_t *v;
+  fib_prefix_t pfx;
+  u32 table_id = ~0;
+  mac_address_t rmac;
+  u8 found = 0;
+  ip46_address_t ip46;
+
+  if (!em->learn_enabled)
+    return;
+
+  pool_foreach (e, em->evis)
+  {
+    if (e->bvi_sw_if_index == sw_if_index)
+      {
+	mac_address_copy (&rmac, &e->bvi_mac);
+	found = 1;
+	clib_memset (&ip46, 0, sizeof (ip46));
+	ip46.ip6 = *address;
+	if (is_del)
+	  evpn_gw_unprotect_ip (e->evi, &ip46, 1, EVPN_GW_SRC_BVI);
+	else
+	  evpn_gw_protect_ip (e->evi, &ip46, 1, address_length,
+			      EVPN_GW_SRC_BVI);
+	break;
+      }
+  }
+  if (!found)
+    {
+      pool_foreach (v, em->vrfs)
+      {
+	if (v->bvi_sw_if_index == sw_if_index)
+	  {
+	    mac_address_copy (&rmac, &v->router_mac);
+	    table_id = v->table_id;
+	    found = 1;
+	    break;
+	  }
+      }
+    }
+  if (!found)
+    return;
+
+  if (table_id == ~0)
+    {
+      u32 fib_index = vec_elt (im->fib_index_by_sw_if_index, sw_if_index);
+      fib_table_t *ft = fib_table_get (fib_index, FIB_PROTOCOL_IP6);
+      if (ft)
+	table_id = ft->ft_table_id;
+    }
+  if (table_id == ~0)
+    return;
+
+  clib_memset (&pfx, 0, sizeof (pfx));
+  pfx.fp_proto = FIB_PROTOCOL_IP6;
+  pfx.fp_len = address_length;
+  pfx.fp_addr.ip6 = *address;
+  evpn_publish_prefix_learn (table_id, &pfx, &rmac, is_del ? 0 : 1);
+}
+
 int
 evpn_learn_enable (u8 enable)
 {
@@ -1452,11 +1658,16 @@ evpn_learn_enable (u8 enable)
 
   if (enable && !addr_cb_registered)
     {
-      ip4_add_del_interface_address_callback_t cb = {
+      ip4_add_del_interface_address_callback_t cb4 = {
 	.function = evpn_ip4_address_cb,
 	.function_opaque = 0,
       };
-      vec_add1 (ip4_main.add_del_interface_address_callbacks, cb);
+      ip6_add_del_interface_address_callback_t cb6 = {
+	.function = evpn_ip6_address_cb,
+	.function_opaque = 0,
+      };
+      vec_add1 (ip4_main.add_del_interface_address_callbacks, cb4);
+      vec_add1 (ip6_main.add_del_interface_address_callbacks, cb6);
       addr_cb_registered = 1;
     }
 

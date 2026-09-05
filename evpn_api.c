@@ -122,7 +122,8 @@ vl_api_evpn_vrf_add_del_t_handler (vl_api_evpn_vrf_add_del_t * mp)
   mac_address_decode (mp->router_mac, &mac);
   if (mp->is_add)
     rv = evpn_vrf_add (ntohl (mp->table_id), ntohl (mp->l3_vni),
-		       mac_address_is_zero (&mac) ? 0 : &mac);
+		       mac_address_is_zero (&mac) ? 0 : &mac,
+		       (evpn_ipv4_nh_mode_t) mp->ipv4_nh_mode);
   else
     rv = evpn_vrf_del (ntohl (mp->table_id));
 
@@ -156,20 +157,18 @@ vl_api_evpn_mac_add_del_t_handler (vl_api_evpn_mac_add_del_t * mp)
   vl_api_evpn_mac_add_del_reply_t *rmp;
   mac_address_t mac;
   ip46_address_t ip = { }, remote = { };
-  u8 is_ip6 = 0;
+  u8 ip_is_ip6 = 0;
   int rv;
 
   mac_address_decode (mp->mac, &mac);
   ip_address_decode (&mp->remote, &remote);
   if (mp->has_ip)
-    is_ip6 = ip_address_decode (&mp->ip, &ip) == IP46_TYPE_IP6;
-  else if (!ip46_address_is_ip4 (&remote))
-    is_ip6 = 1;
+    ip_is_ip6 = ip_address_decode (&mp->ip, &ip) == IP46_TYPE_IP6;
 
   if (mp->is_add)
     rv =
       evpn_mac_add (ntohl (mp->evi), &mac, mp->has_ip ? &ip : 0, mp->has_ip,
-		    is_ip6, &remote);
+		    ip_is_ip6, &remote);
   else
     rv = evpn_mac_del (ntohl (mp->evi), &mac);
 

@@ -5,7 +5,7 @@
 #   L2FIB: 00:00:00:00:00:22 → that vxlan (static)
 #
 # L3 path (symmetric IRB):
-#   BVI10 (table 1) → FIB 172.16.20.0/24 via 169.254.x.y
+#   BVI10 (table 1) → FIB 172.16.20.0/24 via 169.254.x.y (default ipv4-nh-mode auto)
 #   neigh 169.254.x.y → remote rMAC on bvi{10001} (unnumbered to loop10001 in table 1)
 #   L2FIB(bd=10001): rMAC → vxlan(vni=5042 → 10.0.0.2)
 #   traceroute sources the unique tenant /32 on loop10001 (e.g. 10.255.0.1).
@@ -14,5 +14,8 @@
 #   alone does not configure BGP export.
 #
 # Anycast (test/anycast.py):
-#   Shared BVI MAC + VIP stay on the BVI; remote Type-2 for that MAC is ignored.
+#   Shared BVI MAC + VIP(+IPv6) stay on the BVI; remote Type-2 for that MAC is ignored.
 #   Extra static L2FIB → BVI MACs are inferred into the protected set.
+#
+# IPv6 (test/ipv6.py):
+#   IPv6 Type-5 and ipv4-nh-mode ipv6 / auto-on-IPv6-only-BVI use fd00:a9fe:: NH.

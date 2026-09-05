@@ -73,6 +73,7 @@ evpn_vrf_command_fn (vlib_main_t * vm, unformat_input_t * input,
   u32 table_id = ~0, l3_vni = ~0;
   u8 is_add = 1;
   mac_address_t rmac;
+  evpn_ipv4_nh_mode_t ipv4_nh_mode = EVPN_IPV4_NH_AUTO;
   int rv;
 
   mac_address_set_zero (&rmac);
@@ -89,6 +90,12 @@ evpn_vrf_command_fn (vlib_main_t * vm, unformat_input_t * input,
 	;
       else if (unformat (input, "router-mac %U", unformat_mac_address_t, &rmac))
 	;
+      else if (unformat (input, "ipv4-nh-mode auto"))
+	ipv4_nh_mode = EVPN_IPV4_NH_AUTO;
+      else if (unformat (input, "ipv4-nh-mode ipv4"))
+	ipv4_nh_mode = EVPN_IPV4_NH_IPV4;
+      else if (unformat (input, "ipv4-nh-mode ipv6"))
+	ipv4_nh_mode = EVPN_IPV4_NH_IPV6;
       else
 	return clib_error_return (0, "unknown input `%U'",
 				  format_unformat_error, input);
@@ -102,7 +109,8 @@ evpn_vrf_command_fn (vlib_main_t * vm, unformat_input_t * input,
       if (l3_vni == ~0)
 	return clib_error_return (0, "l3-vni required");
       rv = evpn_vrf_add (table_id, l3_vni,
-			 mac_address_is_zero (&rmac) ? 0 : &rmac);
+			 mac_address_is_zero (&rmac) ? 0 : &rmac,
+			 ipv4_nh_mode);
     }
   else
     rv = evpn_vrf_del (table_id);
@@ -114,7 +122,8 @@ evpn_vrf_command_fn (vlib_main_t * vm, unformat_input_t * input,
 
 VLIB_CLI_COMMAND (evpn_vrf_command, static) = {
   .path = "evpn vrf",
-  .short_help = "evpn vrf add table <id> l3-vni <n> [router-mac <mac>] | del table <id>",
+  .short_help =
+    "evpn vrf add table <id> l3-vni <n> [router-mac <mac>] [ipv4-nh-mode auto|ipv4|ipv6] | del table <id>",
   .function = evpn_vrf_command_fn,
 };
 
@@ -189,7 +198,7 @@ evpn_mac_command_fn (vlib_main_t * vm, unformat_input_t * input,
   u32 evi = ~0;
   mac_address_t mac;
   ip46_address_t ip = { }, remote = { };
-  u8 is_add = 1, has_ip = 0, is_ip6 = 0, have_mac = 0, have_remote = 0;
+  u8 is_add = 1, has_ip = 0, ip_is_ip6 = 0, have_mac = 0, have_remote = 0;
   int rv;
 
   mac_address_set_zero (&mac);
@@ -207,20 +216,17 @@ evpn_mac_command_fn (vlib_main_t * vm, unformat_input_t * input,
       else if (unformat (input, "ip %U", unformat_ip4_address, &ip.ip4))
 	{
 	  has_ip = 1;
-	  is_ip6 = 0;
+	  ip_is_ip6 = 0;
 	}
       else if (unformat (input, "ip %U", unformat_ip6_address, &ip.ip6))
 	{
 	  has_ip = 1;
-	  is_ip6 = 1;
+	  ip_is_ip6 = 1;
 	}
       else if (unformat (input, "remote %U", unformat_ip4_address, &remote.ip4))
 	have_remote = 1;
       else if (unformat (input, "remote %U", unformat_ip6_address, &remote.ip6))
-	{
-	  have_remote = 1;
-	  is_ip6 = 1;
-	}
+	have_remote = 1;
       else
 	return clib_error_return (0, "unknown input `%U'",
 				  format_unformat_error, input);
@@ -234,7 +240,7 @@ evpn_mac_command_fn (vlib_main_t * vm, unformat_input_t * input,
       if (!have_remote)
 	return clib_error_return (0, "remote required");
       rv =
-	evpn_mac_add (evi, &mac, has_ip ? &ip : 0, has_ip, is_ip6, &remote);
+	evpn_mac_add (evi, &mac, has_ip ? &ip : 0, has_ip, ip_is_ip6, &remote);
     }
   else
     rv = evpn_mac_del (evi, &mac);
@@ -535,7 +541,8 @@ show_evpn_command_fn (vlib_main_t * vm, unformat_input_t * input,
 			   pr->table_id, format_fib_prefix, &pr->prefix,
 			   format_ip46_address, &pr->remote, IP46_TYPE_ANY,
 			   format_mac_address_t, &pr->router_mac,
-			   format_ip4_address, &pr->overlay_nh4);
+			   format_ip46_address, &pr->overlay_nh,
+			   IP46_TYPE_ANY);
 	}
     }
   vlib_cli_output (vm, "learn: %s", em->learn_enabled ? "enabled" : "disabled");

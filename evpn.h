@@ -23,13 +23,18 @@
 #include <svm/queue.h>
 
 #define EVPN_PLUGIN_VERSION_MAJOR 0
-#define EVPN_PLUGIN_VERSION_MINOR 3
+#define EVPN_PLUGIN_VERSION_MINOR 4
 
 /* L3-VNI BD id = base + fib table id (matches lab stub convention). */
 #define EVPN_L3_BD_BASE 10000
 
-/* Synthetic overlay NH allocation range; unique per peer within a VRF. */
+/* Synthetic overlay NH allocation ranges; unique per peer within a VRF. */
 #define EVPN_OVERLAY_NH_BASE 0xa9fe0000 /* 169.254.0.0 */
+/* IPv6 Type-5 overlay: fd00:a9fe::/64 with 16-bit host id (mirror of above). */
+#define EVPN_OVERLAY_NH6_WORD0_HOST 0xfd00a9fe
+#define EVPN_OVERLAY_NH6_WORD1_HOST 0x00000000
+#define EVPN_OVERLAY_NH6_WORD2_HOST 0x00000000
+/* word3 host = 16-bit host id in low 16 bits */
 
 /* IANA VXLAN UDP dest port; used when dst_port is omitted or 0. */
 #define EVPN_VXLAN_DST_PORT 4789
@@ -72,6 +77,14 @@ typedef struct
   mac_address_t bvi_mac;
 } evpn_evi_t;
 
+/* How IPv4 Type-5 prefixes choose the L3-BVI overlay next hop. */
+typedef enum
+{
+  EVPN_IPV4_NH_AUTO = 0,	/* no IPv4 on L3 BVI → IPv6 NH (RFC 8950-style) */
+  EVPN_IPV4_NH_IPV4 = 1,	/* classic 169.254.x.y */
+  EVPN_IPV4_NH_IPV6 = 2,	/* always fd00:a9fe:: (no 169.254) */
+} evpn_ipv4_nh_mode_t;
+
 typedef struct
 {
   u32 table_id;
@@ -82,6 +95,7 @@ typedef struct
   u32 bd_index;
   u32 bvi_sw_if_index;
   mac_address_t router_mac;
+  evpn_ipv4_nh_mode_t ipv4_nh_mode;
 } evpn_vrf_t;
 
 typedef struct
@@ -131,7 +145,7 @@ typedef struct
   fib_prefix_t prefix;
   ip46_address_t remote;	/* VTEP */
   mac_address_t router_mac;
-  ip4_address_t overlay_nh4;
+  ip46_address_t overlay_nh;	/* 169.254.x.y or fd00:a9fe::xxxx */
   u32 tunnel_index;
   u32 vrf_index;		/* pool index into vrfs */
   u8 from_kernel;		/* installed from FRR/zebra netlink */
@@ -162,7 +176,8 @@ typedef struct
   uword *prefix_by_key;		/* hash of table||prefix */
   uword *gw_mac_by_key;		/* hash of evi||mac → gw_macs index */
   uword *gw_ip_by_key;		/* hash of evi||ip → gw_ips index */
-  uword *kernel_neigh;		/* IPv4 via → packed router MAC */
+  uword *kernel_neigh4;		/* IPv4 via → packed router MAC */
+  uword *kernel_neigh6;		/* hash of IPv6 via → packed router MAC */
   uword *nl_if_mac;		/* ifindex → packed MAC (dataplane links) */
   uword *nl_macvlan_parent;	/* macvlan ifindex → parent ifindex */
 
@@ -222,7 +237,8 @@ int evpn_evi_add (u32 evi, u32 vni, u32 bd_id, u8 irb,
 		  mac_address_t * router_mac_opt);
 int evpn_evi_del (u32 evi);
 
-int evpn_vrf_add (u32 table_id, u32 l3_vni, mac_address_t * router_mac_opt);
+int evpn_vrf_add (u32 table_id, u32 l3_vni, mac_address_t * router_mac_opt,
+		  evpn_ipv4_nh_mode_t ipv4_nh_mode);
 int evpn_vrf_del (u32 table_id);
 
 int evpn_vtep_add (ip46_address_t * local, ip46_address_t * remote,
@@ -230,7 +246,7 @@ int evpn_vtep_add (ip46_address_t * local, ip46_address_t * remote,
 int evpn_vtep_del (ip46_address_t * local, ip46_address_t * remote, u8 is_ip6);
 
 int evpn_mac_add (u32 evi, mac_address_t * mac, ip46_address_t * ip_opt,
-		  u8 has_ip, u8 is_ip6, ip46_address_t * remote);
+		  u8 has_ip, u8 ip_is_ip6, ip46_address_t * remote);
 int evpn_mac_del (u32 evi, mac_address_t * mac);
 
 int evpn_imet_add (u32 evi, ip46_address_t * remote);
