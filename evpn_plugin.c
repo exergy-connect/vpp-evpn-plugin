@@ -10,6 +10,13 @@
 
 #include "evpn.h"
 
+#ifndef EVPN_GIT_HASH
+#define EVPN_GIT_HASH "unknown"
+#endif
+#ifndef EVPN_BUILD_DATE
+#define EVPN_BUILD_DATE "unknown"
+#endif
+
 static clib_error_t *
 evpn_init (vlib_main_t * vm)
 {
@@ -18,7 +25,8 @@ evpn_init (vlib_main_t * vm)
   em->vlib_main = vm;
   em->vnet_main = vnet_get_main ();
   em->log_class = vlib_log_register_class ("evpn", 0);
-  EVPN_NOTICE ("plugin initialized (logging class evpn)");
+  EVPN_NOTICE ("plugin initialized (logging class evpn) build-date %s git %s",
+	       EVPN_BUILD_DATE, EVPN_GIT_HASH);
   return 0;
 }
 

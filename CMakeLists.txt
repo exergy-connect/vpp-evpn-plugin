@@ -12,6 +12,38 @@
 cmake_minimum_required(VERSION 3.16)
 project(evpn_plugin C)
 
+# Build identity — override with -DEVPN_GIT_HASH=... -DEVPN_BUILD_DATE=...
+# (Docker/CI should pass these; local builds auto-detect from git + UTC time.)
+if(NOT EVPN_GIT_HASH)
+  execute_process(
+    COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse --short=12 HEAD
+    OUTPUT_VARIABLE EVPN_GIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(NOT EVPN_GIT_HASH)
+    set(EVPN_GIT_HASH "unknown")
+  else()
+    execute_process(
+      COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}" status --porcelain
+      OUTPUT_VARIABLE _evpn_git_dirty
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+    if(_evpn_git_dirty)
+      set(EVPN_GIT_HASH "${EVPN_GIT_HASH}-dirty")
+    endif()
+  endif()
+endif()
+if(NOT EVPN_BUILD_DATE)
+  string(TIMESTAMP EVPN_BUILD_DATE "%Y-%m-%dT%H:%M:%SZ" UTC)
+endif()
+message(STATUS "EVPN build identity: date=${EVPN_BUILD_DATE} git=${EVPN_GIT_HASH}")
+
+function(evpn_apply_build_identity target)
+  target_compile_definitions(${target} PRIVATE
+    "EVPN_GIT_HASH=\"${EVPN_GIT_HASH}\""
+    "EVPN_BUILD_DATE=\"${EVPN_BUILD_DATE}\"")
+endfunction()
+
 if(VPP_EXTERNAL_PROJECT)
   # Standalone out-of-tree build against installed VPP headers/libs.
   if(NOT VPP_INSTALL_PATH)
@@ -54,6 +86,7 @@ if(VPP_EXTERNAL_PROJECT)
       API_FILES
         evpn.api
     )
+    evpn_apply_build_identity(evpn_plugin)
   else()
     # Minimal fallback: shared object without vat codegen.
     # Generate API headers with vppapigen if present.
@@ -108,6 +141,7 @@ if(VPP_EXTERNAL_PROJECT)
       ${CMAKE_CURRENT_SOURCE_DIR}
       ${CMAKE_CURRENT_BINARY_DIR})
     target_compile_options(evpn_plugin PRIVATE -Wall -fPIC)
+    evpn_apply_build_identity(evpn_plugin)
     find_library(VLIB_LIB vlib HINTS ${VPP_INSTALL_PATH}/lib)
     find_library(VNET_LIB vnet HINTS ${VPP_INSTALL_PATH}/lib)
     find_library(VPPINFRA_LIB vppinfra HINTS ${VPP_INSTALL_PATH}/lib)
@@ -129,4 +163,5 @@ else()
     API_FILES
       evpn.api
   )
+  evpn_apply_build_identity(evpn_plugin)
 endif()

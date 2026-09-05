@@ -70,6 +70,8 @@ jobs:
           REPO="${REPO:-release}"
           echo "vpp_version=${VPP_VERSION}" >> "$GITHUB_OUTPUT"
           echo "repo=${REPO}" >> "$GITHUB_OUTPUT"
+          echo "git_hash=${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v7
@@ -82,6 +84,8 @@ jobs:
           build-args: |
             REPO=${{ steps.args.outputs.repo }}
             VPP_VERSION=${{ steps.args.outputs.vpp_version }}
+            EVPN_GIT_HASH=${{ steps.args.outputs.git_hash }}
+            EVPN_BUILD_DATE=${{ steps.args.outputs.build_date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64

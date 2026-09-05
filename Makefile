@@ -28,8 +28,11 @@ link:
 build: link
 	$(MAKE) -C "$(VPP_DIR)" rebuild
 
+# Optional: EVPN_GIT_HASH=... EVPN_BUILD_DATE=... (UTC ISO8601)
 external:
-	cmake -B build -DVPP_EXTERNAL_PROJECT=ON -DVPP_INSTALL_PATH=/usr
+	cmake -B build -DVPP_EXTERNAL_PROJECT=ON -DVPP_INSTALL_PATH=/usr \
+		$(if $(EVPN_GIT_HASH),-DEVPN_GIT_HASH=$(EVPN_GIT_HASH)) \
+		$(if $(EVPN_BUILD_DATE),-DEVPN_BUILD_DATE=$(EVPN_BUILD_DATE))
 	cmake --build build
 
 clean:

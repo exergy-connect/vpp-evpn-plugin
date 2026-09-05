@@ -2,6 +2,8 @@
 #
 #   docker build -t ghcr.io/exergy-connect/vpp-with-evpn-plugin .
 #   docker build -t ghcr.io/exergy-connect/vpp-with-evpn-plugin --build-arg VPP_VERSION=25.06-release .
+#   docker build ... --build-arg EVPN_GIT_HASH=$(git rev-parse --short=12 HEAD) \
+#     --build-arg EVPN_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 #
 # Extract the .so:
 #   docker create --name evpn-tmp ghcr.io/exergy-connect/vpp-with-evpn-plugin
@@ -14,6 +16,9 @@
 ARG DEBIAN_FRONTEND=noninteractive
 ARG REPO=release
 ARG VPP_VERSION=
+# Plugin build identity (no .git in the image context — pass from CI/host).
+ARG EVPN_GIT_HASH=unknown
+ARG EVPN_BUILD_DATE=
 
 # ---------------------------------------------------------------------------
 # Stage 1: build evpn_plugin.so against vpp-dev
@@ -23,6 +28,8 @@ FROM debian:bookworm AS builder
 ARG DEBIAN_FRONTEND
 ARG REPO
 ARG VPP_VERSION
+ARG EVPN_GIT_HASH
+ARG EVPN_BUILD_DATE
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
 		apt-transport-https \
@@ -74,11 +81,14 @@ COPY . /src/
 # Out-of-tree build. Prefer VPP's add_vpp_plugin when cmake helpers exist;
 # otherwise the CMakeLists.txt fallback + vppapigen path is used.
 RUN set -eux; \
+	BUILD_DATE="${EVPN_BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"; \
 	cmake -B build \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DVPP_EXTERNAL_PROJECT=ON \
 		-DVPP_INSTALL_PATH=/usr \
-		-DCMAKE_INSTALL_PREFIX=/usr; \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DEVPN_GIT_HASH="${EVPN_GIT_HASH}" \
+		-DEVPN_BUILD_DATE="${BUILD_DATE}"; \
 	cmake --build build -j"$(nproc)"; \
 	cmake --install build; \
 	find /usr -name 'evpn_plugin.so' -print; \
