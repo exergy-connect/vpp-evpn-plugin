@@ -179,22 +179,48 @@ evpn_prefix_key (u32 table_id, fib_prefix_t * pfx)
   return k;
 }
 
-static ip4_address_t
-evpn_overlay_nh_from_vtep (ip46_address_t * remote, u8 is_ip6)
+/* A truncated VTEP hash is only a starting point: different VTEPs must
+ * never overwrite one another's neighbor on the shared L3 BVI. */
+static int
+evpn_overlay_nh_allocate (u32 table_id, ip46_address_t * remote,
+                          mac_address_t * router_mac, ip4_address_t * nh)
 {
-  ip4_address_t nh;
-  u32 h;
-  if (is_ip6)
-    h = remote->ip6.as_u32[0] ^ remote->ip6.as_u32[3];
-  else
-    h = remote->ip4.as_u32;
-  /* 169.254.x.y with x.y from hash; avoid .0 and .255 */
-  nh.as_u32 =
-    clib_host_to_net_u32 (EVPN_OVERLAY_NH_BASE |
-			  (0x0000fffe & (h ? h : 1)));
-  if ((nh.as_u8[3] == 0) || (nh.as_u8[3] == 255))
-    nh.as_u8[3] = 1;
-  return nh;
+  evpn_prefix_t *pr;
+  u32 seed = ip46_address_is_ip4 (remote) ?
+    clib_net_to_host_u32 (remote->ip4.as_u32) :
+    (u32) hash_memory (remote->ip6.as_u8, 16, 0);
+
+  pool_foreach (pr, evpn_main.prefixes)
+    {
+      if (pr->table_id == table_id &&
+          ip46_address_is_equal (&pr->remote, remote) &&
+          !memcmp (pr->router_mac.bytes, router_mac->bytes, 6))
+        {
+          *nh = pr->overlay_nh4;
+          return 0;
+        }
+    }
+
+  for (u32 i = 0; i < 65536; i++)
+    {
+      u32 host = (seed + i) & 0xffff;
+      u8 used = 0;
+      if ((host & 0xff) == 0 || (host & 0xff) == 255)
+        continue;
+      nh->as_u32 = clib_host_to_net_u32 (EVPN_OVERLAY_NH_BASE | host);
+      pool_foreach (pr, evpn_main.prefixes)
+        {
+          if (pr->table_id == table_id &&
+              pr->overlay_nh4.as_u32 == nh->as_u32)
+            {
+              used = 1;
+              break;
+            }
+        }
+      if (!used)
+        return 0;
+    }
+  return VNET_API_ERROR_LIMIT_EXCEEDED;
 }
 
 static void
@@ -630,7 +656,7 @@ evpn_mac_add (u32 evi, mac_address_t * mac, ip46_address_t * ip_opt,
 
   if (has_ip && ip_opt && e->bvi_sw_if_index != ~0)
     {
-      ip_address_t ipa;
+      ip_address_t ipa = { };
       u32 stats = ~0;
       if (is_ip6)
 	{
@@ -687,7 +713,7 @@ evpn_mac_del (u32 evi, mac_address_t * mac)
       l2fib_del_entry (mac->bytes, e->bd_index, ~0);
       if (m->has_ip && e->bvi_sw_if_index != ~0)
 	{
-	  ip_address_t ipa;
+	  ip_address_t ipa = { };
 	  if (m->is_ip6)
 	    ip_address_set (&ipa, &m->ip.ip6, AF_IP6);
 	  else
@@ -794,7 +820,7 @@ static void
 evpn_prefix_complete_overlay_adj (evpn_vrf_t * v, ip4_address_t * overlay_nh,
 				  mac_address_t * router_mac)
 {
-  ip_address_t ipa;
+  ip_address_t ipa = { };
   u32 stats = ~0;
 
   ip_address_set (&ipa, overlay_nh, AF_IP4);
@@ -813,7 +839,7 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
   ip46_address_t local;
   u32 encap_fib = 0, tidx = ~0, swi = ~0;
   u16 dst_port = EVPN_VXLAN_DST_PORT;
-  u8 is_ip6 = (pfx->fp_proto == FIB_PROTOCOL_IP6);
+  u8 is_ip6 = !ip46_address_is_ip4 (remote);
   ip4_address_t overlay_nh;
   int rv;
 
@@ -835,7 +861,7 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
   if (p)
     {
       pr = pool_elt_at_index (em->prefixes, p[0]);
-      if (pr->remote.ip4.as_u32 == remote->ip4.as_u32 &&
+      if (ip46_address_is_equal (&pr->remote, remote) &&
 	  !memcmp (pr->router_mac.bytes, router_mac->bytes, 6))
 	{
 	  /* Neighbor before the FIB path leaves arp-ipv4 incomplete. */
@@ -845,21 +871,14 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
       evpn_prefix_del (table_id, pfx);
     }
 
-  rv = evpn_resolve_local_vtep (remote, is_ip6 || !ip46_address_is_ip4 (remote),
-				&local, &encap_fib, &dst_port);
+  rv = evpn_overlay_nh_allocate (table_id, remote, router_mac, &overlay_nh);
   if (rv)
-    {
-      /* Prefer underlay AF of the remote VTEP */
-      is_ip6 = !ip46_address_is_ip4 (remote);
-      rv = evpn_resolve_local_vtep (remote, is_ip6, &local, &encap_fib,
-				    &dst_port);
-      if (rv)
-	{
-	  EVPN_ERR ("prefix add table %u no local VTEP for remote %U",
-		    table_id, format_ip46_address, remote, IP46_TYPE_ANY);
-	  return rv;
-	}
-    }
+    return rv;
+
+  rv = evpn_resolve_local_vtep (remote, is_ip6, &local, &encap_fib,
+                              &dst_port);
+  if (rv)
+    return rv;
 
   /* L3-VNI tunnel attached to L3 BD */
   rv =
@@ -878,8 +897,6 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
   /* Remote router MAC → L2FIB on L3-VNI BD */
   l2fib_add_entry (router_mac->bytes, v->bd_index, swi,
 		   L2FIB_ENTRY_RESULT_FLAG_STATIC);
-
-  overlay_nh = evpn_overlay_nh_from_vtep (remote, is_ip6);
 
   /* FIB first, then neighbor: a pre-existing neighbor does not complete
      the arp-ipv4 adjacency created by the path add. */
@@ -935,13 +952,27 @@ evpn_prefix_del (u32 table_id, fib_prefix_t * pfx)
   fib_table_entry_delete (pfx->fp_proto == FIB_PROTOCOL_IP4 ?
 			  v->fib_index4 : v->fib_index6, pfx, em->fib_src);
 
+  /* Prefixes share neighbors and router-MAC entries. Withdraw each
+   * object only after its last user in this VRF has gone. */
   {
-    ip_address_t ipa;
-    ip_address_set (&ipa, &pr->overlay_nh4, AF_IP4);
-    ip_neighbor_del (&ipa, v->bvi_sw_if_index);
+    evpn_prefix_t *other;
+    u8 nh_used = 0, mac_used = 0;
+    pool_foreach (other, em->prefixes)
+      {
+        if (other == pr || other->vrf_index != pr->vrf_index)
+          continue;
+        nh_used |= other->overlay_nh4.as_u32 == pr->overlay_nh4.as_u32;
+        mac_used |= !memcmp (other->router_mac.bytes, pr->router_mac.bytes, 6);
+      }
+    if (!nh_used)
+      {
+        ip_address_t ipa = { };
+        ip_address_set (&ipa, &pr->overlay_nh4, AF_IP4);
+        ip_neighbor_del (&ipa, v->bvi_sw_if_index);
+      }
+    if (!mac_used)
+      l2fib_del_entry (pr->router_mac.bytes, v->bd_index, ~0);
   }
-
-  l2fib_del_entry (pr->router_mac.bytes, v->bd_index, ~0);
   evpn_tunnel_release (pr->tunnel_index);
 
   hash_unset (em->prefix_by_key, key);
