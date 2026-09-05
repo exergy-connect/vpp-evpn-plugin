@@ -376,7 +376,7 @@ still does not speak BGP.
 | --- | --- | --- |
 | Local EVI / VNI bind | `evpn evi add evi <id> vni <n> bd <id> [irb]` | Remember BD (+ BVI if `irb`). No tunnel yet. IRB also originates a local MAC learn event for the BVI MAC. |
 | Local VRF / L3 VNI bind | `evpn vrf add table <id> l3-vni <n>` | Remember table, BD `10000+id`, L3 BVI. Locks the IP table(s). |
-| Underlay VTEP pair | `evpn vtep add local <ip> remote <ip> [encap-table <id>]` | Local src/encap VRF used when building tunnels. First add becomes the **default local VTEP**. |
+| Underlay VTEP pair | `evpn vtep add local <ip> remote <ip> [encap-table <id>] [dst-port <n>]` | Local src/encap VRF used when building tunnels. First add becomes the **default local VTEP**. `dst-port` is the remote VTEP UDP dest port (default **4789**). |
 | Type-2 MAC(/IP) | `evpn mac add evi <id> mac <mac> [ip <addr>] remote <vtep>` | Acquire VXLAN `{local, remote, evi.vni}`, `set interface l2 bridge` into the EVI BD, static L2FIB `mac → tunnel`. If `ip` and IRB: static neighbor `ip → mac` on the EVI BVI. |
 | Type-3 IMET | `evpn imet add evi <id> remote <vtep>` | Same tunnel acquire + BD attach so the tunnel is on the **flood list** (BUM). No L2FIB entry by itself. |
 | Type-5 prefix | `evpn prefix add table <id> <pfx> remote <vtep> router-mac <mac>` | Acquire VXLAN `{local, remote, l3-vni}`, attach to L3 BD, static L2FIB `router-mac → tunnel`, FIB `pfx via 169.254.x.y` out the L3 BVI, static neighbor `169.254.x.y → router-mac` on that BVI. |
@@ -391,7 +391,9 @@ API).
 
 **Local VTEP resolution:** Type-2/3/5 look up `evpn vtep` by remote address.
 If none matches, the first configured local VTEP of the same address family
-is used. Configure VTEPs before installing remote state.
+is used (including its `dst-port`). Configure VTEPs before installing remote
+state. Tunnel create passes `dst-port` to `create vxlan tunnel` (default
+4789).
 
 **Type-5 overlay next hop:** `169.254.x.y` is hashed from the remote VTEP
 (host byte avoided `.0` / `.255`). It exists only to complete an Ethernet
@@ -450,7 +452,7 @@ reads the kernel instead of the VPP FIB for remote prefixes.
 ```
 evpn evi add evi <id> vni <n> bd <id> [irb] [router-mac <mac>]
 evpn vrf add table <id> l3-vni <n> [router-mac <mac>]
-evpn vtep add local <ip> remote <ip> [encap-table <id>]
+evpn vtep add local <ip> remote <ip> [encap-table <id>] [dst-port <n>]
 evpn mac add evi <id> mac <mac> [ip <addr>] remote <vtep>
 evpn imet add evi <id> remote <vtep>
 evpn prefix add table <id> <prefix>/<len> remote <vtep> router-mac <mac>

@@ -18,13 +18,13 @@ create loopback interface instance 10001
 set interface ip table loop10001 1
 set interface ip address loop10001 10.0.0.1/32
 set interface state loop10001 up
-create bridge-domain 10
+create bridge-domain 10 learn 1 forward 1 uu-flood 0 flood 1 arp-term 1
 bvi create instance 10
 set interface l2 bridge bvi10 10 bvi
 set interface ip table bvi10 1
 set interface ip address bvi10 172.16.10.1/24
 set interface state bvi10 up
-create bridge-domain 10001
+create bridge-domain 10001 learn 0 forward 1 uu-flood 0 flood 0 arp-term 1
 bvi create instance 10001
 set interface l2 bridge bvi10001 10001 bvi
 set interface ip table bvi10001 1

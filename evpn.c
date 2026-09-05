@@ -43,8 +43,8 @@ evpn_find_sw_if_by_name (vnet_main_t * vnm, u32 instance)
 
 static int
 evpn_vxlan_add (ip46_address_t * src, ip46_address_t * dst, u32 vni,
-		u8 is_ip6, u32 encap_fib_index, u32 * sw_if_indexp,
-		u32 * instancep)
+		u8 is_ip6, u32 encap_fib_index, u16 dst_port,
+		u32 * sw_if_indexp, u32 * instancep)
 {
   evpn_main_t *em = &evpn_main;
   u8 *cmd = 0;
@@ -59,19 +59,21 @@ evpn_vxlan_add (ip46_address_t * src, ip46_address_t * dst, u32 vni,
 				     FIB_PROTOCOL_IP4);
   if (table_id == ~0)
     table_id = 0;
+  if (!dst_port)
+    dst_port = EVPN_VXLAN_DST_PORT;
 
   if (is_ip6)
     cmd =
       format (0,
-	      "create vxlan tunnel src %U dst %U vni %u instance %u encap-vrf-id %u",
+	      "create vxlan tunnel src %U dst %U vni %u instance %u encap-vrf-id %u dst-port %u",
 	      format_ip6_address, &src->ip6, format_ip6_address, &dst->ip6,
-	      vni, instance, table_id);
+	      vni, instance, table_id, dst_port);
   else
     cmd =
       format (0,
-	      "create vxlan tunnel src %U dst %U vni %u instance %u encap-vrf-id %u",
+	      "create vxlan tunnel src %U dst %U vni %u instance %u encap-vrf-id %u dst-port %u",
 	      format_ip4_address, &src->ip4, format_ip4_address, &dst->ip4,
-	      vni, instance, table_id);
+	      vni, instance, table_id, dst_port);
 
   EVPN_DBG ("vxlan add instance %u: %v", instance, cmd);
   unformat_init_vector (&input, cmd);
@@ -216,8 +218,8 @@ evpn_feature_init (evpn_main_t * em)
 
 int
 evpn_tunnel_acquire (ip46_address_t * src, ip46_address_t * dst, u32 vni,
-		     u8 is_ip6, u32 encap_fib_index, u32 * tunnel_index,
-		     u32 * sw_if_index)
+		     u8 is_ip6, u32 encap_fib_index, u16 dst_port,
+		     u32 * tunnel_index, u32 * sw_if_index)
 {
   evpn_main_t *em = &evpn_main;
   uword key = evpn_tunnel_key (src, dst, vni, is_ip6);
@@ -227,6 +229,8 @@ evpn_tunnel_acquire (ip46_address_t * src, ip46_address_t * dst, u32 vni,
   u32 swi = ~0;
 
   evpn_feature_init (em);
+  if (!dst_port)
+    dst_port = EVPN_VXLAN_DST_PORT;
 
   p = hash_get (em->tunnel_by_key, key);
   if (p)
@@ -242,8 +246,8 @@ evpn_tunnel_acquire (ip46_address_t * src, ip46_address_t * dst, u32 vni,
 
   {
     u32 instance = 0;
-    rv = evpn_vxlan_add (src, dst, vni, is_ip6, encap_fib_index, &swi,
-			 &instance);
+    rv = evpn_vxlan_add (src, dst, vni, is_ip6, encap_fib_index, dst_port,
+			 &swi, &instance);
     if (rv)
       {
 	EVPN_ERR ("tunnel create failed vni %u src %U dst %U rv=%d", vni,
@@ -258,6 +262,7 @@ evpn_tunnel_acquire (ip46_address_t * src, ip46_address_t * dst, u32 vni,
     t->dst = *dst;
     t->vni = vni;
     t->encap_fib_index = encap_fib_index;
+    t->dst_port = dst_port;
     t->is_ip6 = is_ip6;
     t->sw_if_index = swi;
     t->instance = instance;
@@ -462,13 +467,15 @@ evpn_vrf_del (u32 table_id)
 
 int
 evpn_vtep_add (ip46_address_t * local, ip46_address_t * remote,
-	       u32 encap_table_id, u8 is_ip6)
+	       u32 encap_table_id, u16 dst_port, u8 is_ip6)
 {
   evpn_main_t *em = &evpn_main;
   evpn_vtep_t *vt;
   uword key, *p;
 
   evpn_feature_init (em);
+  if (!dst_port)
+    dst_port = EVPN_VXLAN_DST_PORT;
 
   key = evpn_vtep_key (local, remote, is_ip6);
   p = hash_get (em->vtep_by_key, key);
@@ -485,6 +492,7 @@ evpn_vtep_add (ip46_address_t * local, ip46_address_t * remote,
   vt->local = *local;
   vt->remote = *remote;
   vt->encap_table_id = encap_table_id;
+  vt->dst_port = dst_port;
   vt->is_ip6 = is_ip6;
   hash_set (em->vtep_by_key, key, vt - em->vteps);
 
@@ -493,11 +501,13 @@ evpn_vtep_add (ip46_address_t * local, ip46_address_t * remote,
       em->default_local = *local;
       em->default_local_is_ip6 = is_ip6;
       em->default_encap_table_id = encap_table_id;
+      em->default_dst_port = dst_port;
       em->have_default_local = 1;
     }
-  EVPN_DBG ("vtep add local %U remote %U encap-table %u",
+  EVPN_DBG ("vtep add local %U remote %U encap-table %u dst-port %u",
 	    format_ip46_address, local, IP46_TYPE_ANY,
-	    format_ip46_address, remote, IP46_TYPE_ANY, encap_table_id);
+	    format_ip46_address, remote, IP46_TYPE_ANY, encap_table_id,
+	    dst_port);
   return 0;
 }
 
@@ -523,7 +533,8 @@ evpn_vtep_del (ip46_address_t * local, ip46_address_t * remote, u8 is_ip6)
 
 static int
 evpn_resolve_local_vtep (ip46_address_t * remote, u8 is_ip6,
-			 ip46_address_t * local_out, u32 * encap_fib_out)
+			 ip46_address_t * local_out, u32 * encap_fib_out,
+			 u16 * dst_port_out)
 {
   evpn_main_t *em = &evpn_main;
   evpn_vtep_t *vt;
@@ -540,6 +551,7 @@ evpn_resolve_local_vtep (ip46_address_t * remote, u8 is_ip6,
 			  vt->encap_table_id);
 	if (*encap_fib_out == ~0)
 	  *encap_fib_out = 0;
+	*dst_port_out = vt->dst_port ? vt->dst_port : EVPN_VXLAN_DST_PORT;
 	return 0;
       }
   }
@@ -552,6 +564,8 @@ evpn_resolve_local_vtep (ip46_address_t * remote, u8 is_ip6,
 			em->default_encap_table_id);
       if (*encap_fib_out == ~0)
 	*encap_fib_out = 0;
+      *dst_port_out =
+	em->default_dst_port ? em->default_dst_port : EVPN_VXLAN_DST_PORT;
       return 0;
     }
   return VNET_API_ERROR_NO_SUCH_ENTRY;
@@ -567,6 +581,7 @@ evpn_mac_add (u32 evi, mac_address_t * mac, ip46_address_t * ip_opt,
   evpn_mac_t *m;
   ip46_address_t local;
   u32 encap_fib = 0, tidx = ~0, swi = ~0;
+  u16 dst_port = EVPN_VXLAN_DST_PORT;
   int rv;
 
   evpn_feature_init (em);
@@ -587,7 +602,7 @@ evpn_mac_add (u32 evi, mac_address_t * mac, ip46_address_t * ip_opt,
       return VNET_API_ERROR_VALUE_EXIST;
     }
 
-  rv = evpn_resolve_local_vtep (remote, is_ip6, &local, &encap_fib);
+  rv = evpn_resolve_local_vtep (remote, is_ip6, &local, &encap_fib, &dst_port);
   if (rv)
     {
       EVPN_ERR ("mac add evi %u no local VTEP for remote %U", evi,
@@ -596,8 +611,8 @@ evpn_mac_add (u32 evi, mac_address_t * mac, ip46_address_t * ip_opt,
     }
 
   rv =
-    evpn_tunnel_acquire (&local, remote, e->vni, is_ip6, encap_fib, &tidx,
-			 &swi);
+    evpn_tunnel_acquire (&local, remote, e->vni, is_ip6, encap_fib, dst_port,
+			 &tidx, &swi);
   if (rv)
     {
       EVPN_ERR ("mac add evi %u tunnel acquire failed vni %u rv=%d", evi,
@@ -696,6 +711,7 @@ evpn_imet_add (u32 evi, ip46_address_t * remote)
   evpn_imet_t *im;
   ip46_address_t local;
   u32 encap_fib = 0, tidx = ~0, swi = ~0;
+  u16 dst_port = EVPN_VXLAN_DST_PORT;
   u8 is_ip6 = !ip46_address_is_ip4 (remote);
   int rv;
 
@@ -717,7 +733,7 @@ evpn_imet_add (u32 evi, ip46_address_t * remote)
       return VNET_API_ERROR_VALUE_EXIST;
     }
 
-  rv = evpn_resolve_local_vtep (remote, is_ip6, &local, &encap_fib);
+  rv = evpn_resolve_local_vtep (remote, is_ip6, &local, &encap_fib, &dst_port);
   if (rv)
     {
       EVPN_ERR ("imet add evi %u no local VTEP for remote %U", evi,
@@ -726,8 +742,8 @@ evpn_imet_add (u32 evi, ip46_address_t * remote)
     }
 
   rv =
-    evpn_tunnel_acquire (&local, remote, e->vni, is_ip6, encap_fib, &tidx,
-			 &swi);
+    evpn_tunnel_acquire (&local, remote, e->vni, is_ip6, encap_fib, dst_port,
+			 &tidx, &swi);
   if (rv)
     {
       EVPN_ERR ("imet add evi %u tunnel acquire failed vni %u rv=%d", evi,
@@ -796,6 +812,7 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
   evpn_prefix_t *pr;
   ip46_address_t local;
   u32 encap_fib = 0, tidx = ~0, swi = ~0;
+  u16 dst_port = EVPN_VXLAN_DST_PORT;
   u8 is_ip6 = (pfx->fp_proto == FIB_PROTOCOL_IP6);
   ip4_address_t overlay_nh;
   int rv;
@@ -829,12 +846,13 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
     }
 
   rv = evpn_resolve_local_vtep (remote, is_ip6 || !ip46_address_is_ip4 (remote),
-				&local, &encap_fib);
+				&local, &encap_fib, &dst_port);
   if (rv)
     {
       /* Prefer underlay AF of the remote VTEP */
       is_ip6 = !ip46_address_is_ip4 (remote);
-      rv = evpn_resolve_local_vtep (remote, is_ip6, &local, &encap_fib);
+      rv = evpn_resolve_local_vtep (remote, is_ip6, &local, &encap_fib,
+				    &dst_port);
       if (rv)
 	{
 	  EVPN_ERR ("prefix add table %u no local VTEP for remote %U",
@@ -845,8 +863,8 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
 
   /* L3-VNI tunnel attached to L3 BD */
   rv =
-    evpn_tunnel_acquire (&local, remote, v->l3_vni, is_ip6, encap_fib, &tidx,
-			 &swi);
+    evpn_tunnel_acquire (&local, remote, v->l3_vni, is_ip6, encap_fib,
+			 dst_port, &tidx, &swi);
   if (rv)
     {
       EVPN_ERR ("prefix add table %u tunnel acquire failed l3-vni %u rv=%d",
@@ -955,10 +973,10 @@ u8 *
 format_evpn_tunnel (u8 * s, va_list * args)
 {
   evpn_tunnel_t *t = va_arg (*args, evpn_tunnel_t *);
-  s = format (s, "[%u] src %U dst %U vni %u sw_if %u ref %u",
+  s = format (s, "[%u] src %U dst %U vni %u dst-port %u sw_if %u ref %u",
 	      t - evpn_main.tunnels,
 	      format_ip46_address, &t->src, IP46_TYPE_ANY,
 	      format_ip46_address, &t->dst, IP46_TYPE_ANY,
-	      t->vni, t->sw_if_index, t->refcnt);
+	      t->vni, t->dst_port, t->sw_if_index, t->refcnt);
   return s;
 }

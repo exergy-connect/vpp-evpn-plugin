@@ -30,6 +30,9 @@
 /* Synthetic overlay NH in 169.254.0.0/16 derived from remote VTEP. */
 #define EVPN_OVERLAY_NH_BASE 0xa9fe0000 /* 169.254.0.0 */
 
+/* IANA VXLAN UDP dest port; used when dst-port is omitted or 0. */
+#define EVPN_VXLAN_DST_PORT 4789
+
 typedef struct
 {
   u32 evi;
@@ -58,6 +61,7 @@ typedef struct
   ip46_address_t local;
   ip46_address_t remote;
   u32 encap_table_id;
+  u16 dst_port;			/* remote VTEP UDP dest port */
   u8 is_ip6;
 } evpn_vtep_t;
 
@@ -68,6 +72,7 @@ typedef struct
   ip46_address_t dst;
   u32 vni;
   u32 encap_fib_index;
+  u16 dst_port;
   u8 is_ip6;
   u32 sw_if_index;
   u32 instance;			/* vxlan_tunnel instance id */
@@ -130,6 +135,7 @@ typedef struct
   u8 have_default_local;
   u8 default_local_is_ip6;
   u32 default_encap_table_id;
+  u16 default_dst_port;
 
   fib_source_t fib_src;
 
@@ -170,7 +176,7 @@ int evpn_vrf_add (u32 table_id, u32 l3_vni, mac_address_t * router_mac_opt);
 int evpn_vrf_del (u32 table_id);
 
 int evpn_vtep_add (ip46_address_t * local, ip46_address_t * remote,
-		   u32 encap_table_id, u8 is_ip6);
+		   u32 encap_table_id, u16 dst_port, u8 is_ip6);
 int evpn_vtep_del (ip46_address_t * local, ip46_address_t * remote, u8 is_ip6);
 
 int evpn_mac_add (u32 evi, mac_address_t * mac, ip46_address_t * ip_opt,
@@ -188,7 +194,7 @@ int evpn_learn_enable (u8 enable);
 
 /* Tunnel refcount helpers */
 int evpn_tunnel_acquire (ip46_address_t * src, ip46_address_t * dst,
-			 u32 vni, u8 is_ip6, u32 encap_fib_index,
+			 u32 vni, u8 is_ip6, u32 encap_fib_index, u16 dst_port,
 			 u32 * tunnel_index, u32 * sw_if_index);
 void evpn_tunnel_release (u32 tunnel_index);
 

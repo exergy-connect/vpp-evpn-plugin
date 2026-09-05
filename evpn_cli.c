@@ -123,7 +123,7 @@ evpn_vtep_command_fn (vlib_main_t * vm, unformat_input_t * input,
 		      vlib_cli_command_t * cmd)
 {
   ip46_address_t local = { }, remote = { };
-  u32 encap_table = 0;
+  u32 encap_table = 0, dst_port = EVPN_VXLAN_DST_PORT;
   u8 is_add = 1, have_local = 0, have_remote = 0, is_ip6 = 0;
   int rv;
 
@@ -152,6 +152,8 @@ evpn_vtep_command_fn (vlib_main_t * vm, unformat_input_t * input,
 	}
       else if (unformat (input, "encap-table %u", &encap_table))
 	;
+      else if (unformat (input, "dst-port %u", &dst_port))
+	;
       else
 	return clib_error_return (0, "unknown input `%U'",
 				  format_unformat_error, input);
@@ -160,8 +162,11 @@ evpn_vtep_command_fn (vlib_main_t * vm, unformat_input_t * input,
   if (!have_local || !have_remote)
     return clib_error_return (0, "local and remote required");
 
+  if (dst_port > 65535)
+    return clib_error_return (0, "dst-port must be 0-65535");
+
   if (is_add)
-    rv = evpn_vtep_add (&local, &remote, encap_table, is_ip6);
+    rv = evpn_vtep_add (&local, &remote, encap_table, (u16) dst_port, is_ip6);
   else
     rv = evpn_vtep_del (&local, &remote, is_ip6);
 
@@ -172,7 +177,8 @@ evpn_vtep_command_fn (vlib_main_t * vm, unformat_input_t * input,
 
 VLIB_CLI_COMMAND (evpn_vtep_command, static) = {
   .path = "evpn vtep",
-  .short_help = "evpn vtep add local <ip> remote <ip> [encap-table <id>] | del ...",
+  .short_help =
+    "evpn vtep add local <ip> remote <ip> [encap-table <id>] [dst-port <n>] | del ...",
   .function = evpn_vtep_command_fn,
 };
 
@@ -466,10 +472,10 @@ show_evpn_command_fn (vlib_main_t * vm, unformat_input_t * input,
       vlib_cli_output (vm, "VTEPs:");
       pool_foreach (vt, em->vteps)
 	{
-	  vlib_cli_output (vm, "  local %U remote %U encap-table %u",
+	  vlib_cli_output (vm, "  local %U remote %U encap-table %u dst-port %u",
 			   format_ip46_address, &vt->local, IP46_TYPE_ANY,
 			   format_ip46_address, &vt->remote, IP46_TYPE_ANY,
-			   vt->encap_table_id);
+			   vt->encap_table_id, vt->dst_port);
 	}
     }
   if (show_all || show_tunnel)

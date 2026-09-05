@@ -7,7 +7,7 @@
  * a userspace agent translates EVPN RIB ↔ these messages.
  */
 
-option version = "0.1.0";
+option version = "0.2.0";
 
 import "vnet/ip/ip_types.api";
 import "vnet/ethernet/ethernet_types.api";
@@ -46,6 +46,7 @@ autoreply define evpn_vtep_add_del
   vl_api_address_t local;
   vl_api_address_t remote;
   u32 encap_table_id;
+  u16 dst_port [default=4789];
 };
 
 autoreply define evpn_mac_add_del

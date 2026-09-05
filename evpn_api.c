@@ -142,7 +142,8 @@ vl_api_evpn_vtep_add_del_t_handler (vl_api_evpn_vtep_add_del_t * mp)
 
   if (mp->is_add)
     rv =
-      evpn_vtep_add (&local, &remote, ntohl (mp->encap_table_id), is_ip6);
+      evpn_vtep_add (&local, &remote, ntohl (mp->encap_table_id),
+		     ntohs (mp->dst_port), is_ip6);
   else
     rv = evpn_vtep_del (&local, &remote, is_ip6);
 
