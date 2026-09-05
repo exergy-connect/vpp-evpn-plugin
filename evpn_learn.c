@@ -82,6 +82,7 @@ typedef enum
 enum
 {
   EVPN_LEARN_EVT_RECONCILE = 1,
+  EVPN_LEARN_EVT_NETLINK,
 };
 
 /* Forward decls */
@@ -1253,7 +1254,7 @@ evpn_nl_process_msg (struct nlmsghdr *nh)
 }
 
 static clib_error_t *
-evpn_nl_fd_read (clib_file_t * uf)
+evpn_nl_drain (void)
 {
   evpn_main_t *em = &evpn_main;
   u8 chunk[8192];
@@ -1295,6 +1296,17 @@ evpn_nl_fd_read (clib_file_t * uf)
 	  evpn_nl_process_msg (nh);
 	}
     }
+  return 0;
+}
+
+static clib_error_t *
+evpn_nl_fd_read (clib_file_t * uf)
+{
+  /* File callbacks have no current VLIB process. Route updates can create
+   * VXLAN tunnels through vlib_cli_input, which requires that context. */
+  vlib_process_signal_event (evpn_main.vlib_main,
+                            evpn_learn_process_node.index,
+                            EVPN_LEARN_EVT_NETLINK, 0);
   return 0;
 }
 
@@ -1405,6 +1417,12 @@ evpn_learn_process (vlib_main_t * vm, vlib_node_runtime_t * rt,
 
       if (event_type == EVPN_LEARN_EVT_RECONCILE)
 	evpn_learn_reconcile ();
+      else if (event_type == EVPN_LEARN_EVT_NETLINK)
+        {
+          clib_error_t *error = evpn_nl_drain ();
+          if (error)
+            clib_error_report (error);
+        }
     }
   return 0;
 }
