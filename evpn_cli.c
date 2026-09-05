@@ -7,6 +7,7 @@
 #include <vnet/vnet.h>
 #include <vnet/ip/ip.h>
 #include <vnet/fib/fib_types.h>
+#include <string.h>
 #include "evpn.h"
 
 static clib_error_t *
@@ -512,6 +513,13 @@ show_evpn_command_fn (vlib_main_t * vm, unformat_input_t * input,
 	}
     }
   vlib_cli_output (vm, "learn: %s", em->learn_enabled ? "enabled" : "disabled");
+  {
+    vlib_log_subclass_data_t *sc =
+      vlib_log_get_subclass_data (em->log_class);
+    vlib_cli_output (vm, "logging: class evpn level %U syslog-level %U",
+		     format_vlib_log_level, sc->level,
+		     format_vlib_log_level, sc->syslog_level);
+  }
   return 0;
 }
 
@@ -519,4 +527,70 @@ VLIB_CLI_COMMAND (show_evpn_command, static) = {
   .path = "show evpn",
   .short_help = "show evpn [evi|vrf|mac|prefix|tunnel|imet|vtep]",
   .function = show_evpn_command_fn,
+};
+
+static uword
+unformat_evpn_log_level (unformat_input_t * input, va_list * args)
+{
+  vlib_log_level_t *level = va_arg (*args, vlib_log_level_t *);
+  u8 *level_str = 0;
+  uword rv = 0;
+
+  if (!unformat (input, "%s", &level_str))
+    return 0;
+
+#define _(uc, lc)							\
+  if (!strcmp ((char *) level_str, #lc))				\
+    {									\
+      *level = VLIB_LOG_LEVEL_##uc;					\
+      rv = 1;								\
+      goto done;							\
+    }
+  foreach_vlib_log_level;
+#undef _
+
+done:
+  vec_free (level_str);
+  return rv;
+}
+
+static clib_error_t *
+evpn_logging_command_fn (vlib_main_t * vm, unformat_input_t * input,
+			 vlib_cli_command_t * cmd)
+{
+  evpn_main_t *em = &evpn_main;
+  vlib_log_subclass_data_t *sc;
+  vlib_log_level_t level = VLIB_LOG_LEVEL_UNKNOWN;
+  vlib_log_level_t syslog_level = VLIB_LOG_LEVEL_UNKNOWN;
+  u8 have_level = 0, have_syslog = 0;
+
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "level %U", unformat_evpn_log_level, &level))
+	have_level = 1;
+      else if (unformat (input, "syslog-level %U", unformat_evpn_log_level,
+			 &syslog_level))
+	have_syslog = 1;
+      else
+	return clib_error_return (0, "unknown input `%U'",
+				  format_unformat_error, input);
+    }
+
+  sc = vlib_log_get_subclass_data (em->log_class);
+  if (have_level)
+    sc->level = level;
+  if (have_syslog)
+    sc->syslog_level = syslog_level;
+
+  vlib_cli_output (vm, "evpn logging: level %U syslog-level %U",
+		   format_vlib_log_level, sc->level, format_vlib_log_level,
+		   sc->syslog_level);
+  return 0;
+}
+
+VLIB_CLI_COMMAND (evpn_logging_command, static) = {
+  .path = "evpn logging",
+  .short_help =
+    "evpn logging [level <emerg|alert|crit|error|warn|notice|info|debug|disabled>] [syslog-level <level>]",
+  .function = evpn_logging_command_fn,
 };

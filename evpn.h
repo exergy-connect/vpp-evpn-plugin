@@ -19,6 +19,7 @@
 #include <vnet/fib/fib_source.h>
 #include <vppinfra/error.h>
 #include <vppinfra/hash.h>
+#include <vlib/log.h>
 
 #define EVPN_PLUGIN_VERSION_MAJOR 0
 #define EVPN_PLUGIN_VERSION_MINOR 1
@@ -140,11 +141,21 @@ typedef struct
   u16 msg_id_base;
   uword *learn_clients;		/* client_index bitmap / vec */
 
+  /* Logging: class "evpn". Level via `evpn logging` or
+   * `set logging class evpn level <emerg|alert|crit|error|warn|notice|info|debug|disabled>`. */
+  vlib_log_class_t log_class;
+
   vlib_main_t *vlib_main;
   vnet_main_t *vnet_main;
 } evpn_main_t;
 
 extern evpn_main_t evpn_main;
+
+#define EVPN_DBG(...)	vlib_log_debug (evpn_main.log_class, __VA_ARGS__)
+#define EVPN_INFO(...)	vlib_log_info (evpn_main.log_class, __VA_ARGS__)
+#define EVPN_NOTICE(...) vlib_log_notice (evpn_main.log_class, __VA_ARGS__)
+#define EVPN_WARN(...)	vlib_log_warn (evpn_main.log_class, __VA_ARGS__)
+#define EVPN_ERR(...)	vlib_log_err (evpn_main.log_class, __VA_ARGS__)
 
 /* ---- Object API (CLI and binary API call these) ---- */
 

@@ -47,6 +47,8 @@ evpn_publish_mac_learn (u32 evi, mac_address_t * mac, u32 sw_if_index,
     }
 
   evpn_send_mac_learn_event (evi, mac, sw_if_index, is_add);
+  EVPN_DBG ("learn mac %s evi %u mac %U sw_if %u", is_add ? "add" : "del",
+	    evi, format_mac_address_t, mac, sw_if_index);
 }
 
 void
@@ -76,6 +78,9 @@ evpn_publish_prefix_learn (u32 table_id, fib_prefix_t * pfx,
     }
 
   evpn_send_prefix_learn_event (table_id, pfx, router_mac, is_add);
+  EVPN_DBG ("learn prefix %s table %u %U rmac %U", is_add ? "add" : "del",
+	    table_id, format_fib_prefix, pfx, format_mac_address_t,
+	    router_mac);
 }
 
 static int
@@ -241,6 +246,7 @@ evpn_learn_enable (u8 enable)
   static u8 addr_cb_registered;
 
   em->learn_enabled = enable;
+  EVPN_NOTICE ("learn %s", enable ? "enabled" : "disabled");
 
   if (enable && !addr_cb_registered)
     {

@@ -67,17 +67,27 @@ if(VPP_EXTERNAL_PROJECT)
           ${API_GEN_DIR}/evpn.api_enum.h
           ${API_GEN_DIR}/evpn.api_types.h
           ${API_GEN_DIR}/evpn.api.c
+          ${API_GEN_DIR}/evpn.api_json.h
         COMMAND ${VPPAPIGEN}
+          --includedir ${VPP_INCLUDE_DIR}
           --input ${CMAKE_CURRENT_SOURCE_DIR}/evpn.api
-          --output-directory ${API_GEN_DIR}
-          --output-file-prefix evpn
+          --outputdir ${API_GEN_DIR}
+          --output ${API_GEN_DIR}/evpn.api.h
+          C
+        COMMAND ${VPPAPIGEN}
+          --includedir ${VPP_INCLUDE_DIR}
+          --input ${CMAKE_CURRENT_SOURCE_DIR}/evpn.api
+          --outputdir ${API_GEN_DIR}
+          --output ${API_GEN_DIR}/evpn.api.json
+          JSON
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/evpn.api
         COMMENT "Generating EVPN API bindings")
+      # Generated .api.c is #included by evpn_api.c, not compiled separately.
       set(API_GEN_SRCS
         ${API_GEN_DIR}/evpn.api.h
         ${API_GEN_DIR}/evpn.api_enum.h
         ${API_GEN_DIR}/evpn.api_types.h
-        ${API_GEN_DIR}/evpn.api.c)
+        ${API_GEN_DIR}/evpn.api_json.h)
       include_directories(${CMAKE_CURRENT_BINARY_DIR})
     else()
       message(WARNING "vppapigen not found; build may fail without generated API headers")

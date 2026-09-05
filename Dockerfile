@@ -35,12 +35,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 		make \
 		pkg-config \
 		python3 \
+		python3-ply \
 	&& rm -rf /var/lib/apt/lists/*
 
 # FD.io packagecloud repo + install VPP runtime + headers (vpp-dev).
+# VPP's postinst runs sysctl / tries to start a service — both fail in build
+# containers without CAP_SYS_ADMIN / systemd. Stub them like the lab image.
 RUN set -eux; \
 	REPO_URL="https://packagecloud.io/install/repositories/fdio/${REPO}"; \
 	curl -sS "${REPO_URL}/script.deb.sh" | bash; \
+	printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d; \
+	chmod +x /usr/sbin/policy-rc.d; \
+	sysctl_bin="$(command -v sysctl)"; \
+	mv "$sysctl_bin" "${sysctl_bin}.real"; \
+	printf '#!/bin/sh\nexit 0\n' > "$sysctl_bin"; \
+	chmod +x "$sysctl_bin"; \
 	apt-get update; \
 	if [ -n "${VPP_VERSION}" ]; then \
 		apt-get install -y --no-install-recommends \
@@ -48,13 +57,14 @@ RUN set -eux; \
 			"vpp-plugin-core=${VPP_VERSION}" \
 			"vpp-dev=${VPP_VERSION}" \
 			"libvppinfra-dev=${VPP_VERSION}" \
-			"python3-vpp-api=${VPP_VERSION}" \
 		|| apt-get install -y --no-install-recommends \
-			vpp vpp-plugin-core vpp-dev libvppinfra-dev python3-vpp-api; \
+			vpp vpp-plugin-core vpp-dev libvppinfra-dev; \
 	else \
 		apt-get install -y --no-install-recommends \
-			vpp vpp-plugin-core vpp-dev libvppinfra-dev python3-vpp-api; \
+			vpp vpp-plugin-core vpp-dev libvppinfra-dev; \
 	fi; \
+	mv "${sysctl_bin}.real" "$sysctl_bin"; \
+	rm -f /usr/sbin/policy-rc.d; \
 	dpkg-query -W -f='${Package} ${Version}\n' 'vpp*' 'libvppinfra*' | sort; \
 	rm -rf /var/lib/apt/lists/*
 
@@ -98,7 +108,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN set -eux; \
 	REPO_URL="https://packagecloud.io/install/repositories/fdio/${REPO}"; \
 	curl -sS "${REPO_URL}/script.deb.sh" | bash; \
-	# Containers often lack CAP_SYS_ADMIN for sysctl during package scripts.
+	# Containers often lack CAP_SYS_ADMIN for sysctl; no systemd for services.
+	printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d; \
+	chmod +x /usr/sbin/policy-rc.d; \
 	sysctl_bin="$(command -v sysctl)"; \
 	mv "$sysctl_bin" "${sysctl_bin}.real"; \
 	printf '#!/bin/sh\nexit 0\n' > "$sysctl_bin"; \
@@ -113,6 +125,7 @@ RUN set -eux; \
 		apt-get install -y --no-install-recommends vpp vpp-plugin-core; \
 	fi; \
 	mv "${sysctl_bin}.real" "$sysctl_bin"; \
+	rm -f /usr/sbin/policy-rc.d; \
 	dpkg-query -f '${Version}\n' -W vpp > /vpp-version; \
 	rm -rf /var/lib/apt/lists/*
 

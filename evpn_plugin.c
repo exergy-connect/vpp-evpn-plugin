@@ -17,6 +17,8 @@ evpn_init (vlib_main_t * vm)
 
   em->vlib_main = vm;
   em->vnet_main = vnet_get_main ();
+  em->log_class = vlib_log_register_class ("evpn", 0);
+  EVPN_NOTICE ("plugin initialized (logging class evpn)");
   return 0;
 }
 

@@ -72,15 +72,24 @@ evpn_vxlan_add (ip46_address_t * src, ip46_address_t * dst, u32 vni,
 	      format_ip4_address, &src->ip4, format_ip4_address, &dst->ip4,
 	      vni, instance, table_id);
 
+  EVPN_DBG ("vxlan add instance %u: %v", instance, cmd);
   unformat_init_vector (&input, cmd);
   rv = vlib_cli_input (em->vlib_main, &input, 0, 0);
   unformat_free (&input);
   if (rv)
-    return VNET_API_ERROR_INVALID_VALUE;
+    {
+      EVPN_ERR ("vxlan tunnel create failed instance %u vni %u rv=%d",
+		instance, vni, rv);
+      return VNET_API_ERROR_INVALID_VALUE;
+    }
 
   swi = evpn_find_sw_if_by_name (em->vnet_main, instance);
   if (swi == ~0)
-    return VNET_API_ERROR_INVALID_INTERFACE;
+    {
+      EVPN_ERR ("vxlan tunnel instance %u vni %u created but ifname missing",
+		instance, vni);
+      return VNET_API_ERROR_INVALID_INTERFACE;
+    }
 
   *sw_if_indexp = swi;
   *instancep = instance;
@@ -105,10 +114,16 @@ evpn_vxlan_del (ip46_address_t * src, ip46_address_t * dst, u32 vni,
 		  format_ip4_address, &src->ip4, format_ip4_address,
 		  &dst->ip4, vni);
 
+  EVPN_DBG ("vxlan del: %v", cmd);
   unformat_init_vector (&input, cmd);
   rv = vlib_cli_input (em->vlib_main, &input, 0, 0);
   unformat_free (&input);
-  return rv ? VNET_API_ERROR_INVALID_VALUE : 0;
+  if (rv)
+    {
+      EVPN_ERR ("vxlan tunnel delete failed vni %u rv=%d", vni, rv);
+      return VNET_API_ERROR_INVALID_VALUE;
+    }
+  return 0;
 }
 
 static u64
@@ -217,6 +232,8 @@ evpn_tunnel_acquire (ip46_address_t * src, ip46_address_t * dst, u32 vni,
     {
       t = pool_elt_at_index (em->tunnels, p[0]);
       t->refcnt++;
+      EVPN_DBG ("tunnel reuse vni %u sw_if %u ref %u", vni, t->sw_if_index,
+		t->refcnt);
       *tunnel_index = p[0];
       *sw_if_index = t->sw_if_index;
       return 0;
@@ -227,7 +244,12 @@ evpn_tunnel_acquire (ip46_address_t * src, ip46_address_t * dst, u32 vni,
     rv = evpn_vxlan_add (src, dst, vni, is_ip6, encap_fib_index, &swi,
 			 &instance);
     if (rv)
-      return rv;
+      {
+	EVPN_ERR ("tunnel create failed vni %u src %U dst %U rv=%d", vni,
+		  format_ip46_address, src, IP46_TYPE_ANY,
+		  format_ip46_address, dst, IP46_TYPE_ANY, rv);
+	return rv;
+      }
 
     pool_get (em->tunnels, t);
     clib_memset (t, 0, sizeof (*t));
@@ -243,6 +265,10 @@ evpn_tunnel_acquire (ip46_address_t * src, ip46_address_t * dst, u32 vni,
 
     vnet_sw_interface_set_flags (em->vnet_main, swi,
 				 VNET_SW_INTERFACE_FLAG_ADMIN_UP);
+
+    EVPN_DBG ("tunnel create vni %u src %U dst %U sw_if %u instance %u",
+	      vni, format_ip46_address, src, IP46_TYPE_ANY,
+	      format_ip46_address, dst, IP46_TYPE_ANY, swi, instance);
 
     *tunnel_index = t - em->tunnels;
     *sw_if_index = swi;
@@ -263,8 +289,13 @@ evpn_tunnel_release (u32 tunnel_index)
   if (t->refcnt == 0)
     return;
   if (--t->refcnt > 0)
-    return;
+    {
+      EVPN_DBG ("tunnel release vni %u sw_if %u ref %u", t->vni,
+		t->sw_if_index, t->refcnt);
+      return;
+    }
 
+  EVPN_DBG ("tunnel delete vni %u sw_if %u", t->vni, t->sw_if_index);
   evpn_vxlan_del (&t->src, &t->dst, t->vni, t->is_ip6);
 
   key = evpn_tunnel_key (&t->src, &t->dst, t->vni, t->is_ip6);
@@ -287,7 +318,10 @@ evpn_evi_add (u32 evi, u32 vni, u32 bd_id, u8 irb,
 
   p = hash_get (em->evi_by_id, evi);
   if (p)
-    return VNET_API_ERROR_VALUE_EXIST;
+    {
+      EVPN_WARN ("evi add evi %u already exists", evi);
+      return VNET_API_ERROR_VALUE_EXIST;
+    }
 
   clib_memset (&bd_args, 0, sizeof (bd_args));
   bd_args.bd_id = bd_id;
@@ -325,6 +359,8 @@ evpn_evi_add (u32 evi, u32 vni, u32 bd_id, u8 irb,
       rv = l2_bvi_create (bd_id, &mac, &swi);
       if (rv)
 	{
+	  EVPN_ERR ("evi add evi %u irb bvi create failed bd %u rv=%d", evi,
+		    bd_id, rv);
 	  pool_put (em->evis, e);
 	  return rv;
 	}
@@ -346,6 +382,7 @@ evpn_evi_add (u32 evi, u32 vni, u32 bd_id, u8 irb,
     }
 
   hash_set (em->evi_by_id, evi, e - em->evis);
+  EVPN_DBG ("evi add %U", format_evpn_evi, e);
   return 0;
 }
 
@@ -359,8 +396,12 @@ evpn_evi_del (u32 evi)
 
   p = hash_get (em->evi_by_id, evi);
   if (!p)
-    return VNET_API_ERROR_NO_SUCH_ENTRY;
+    {
+      EVPN_WARN ("evi del evi %u not found", evi);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
   e = pool_elt_at_index (em->evis, p[0]);
+  EVPN_DBG ("evi del %U", format_evpn_evi, e);
 
   if (e->bvi_sw_if_index != ~0)
     {
@@ -396,7 +437,10 @@ evpn_vrf_add (u32 table_id, u32 l3_vni, mac_address_t * router_mac_opt)
 
   p = hash_get (em->vrf_by_table, table_id);
   if (p)
-    return VNET_API_ERROR_VALUE_EXIST;
+    {
+      EVPN_WARN ("vrf add table %u already exists", table_id);
+      return VNET_API_ERROR_VALUE_EXIST;
+    }
 
   /* Create tenant IP tables */
   ip_table_create (FIB_PROTOCOL_IP4, table_id, 0 /* is_api */, 0,
@@ -422,7 +466,11 @@ evpn_vrf_add (u32 table_id, u32 l3_vni, mac_address_t * router_mac_opt)
 
   rv = l2_bvi_create (bd_id, &mac, &swi);
   if (rv)
-    return rv;
+    {
+      EVPN_ERR ("vrf add table %u l3 bvi create failed bd %u rv=%d", table_id,
+		bd_id, rv);
+      return rv;
+    }
 
   set_int_l2_mode (em->vlib_main, em->vnet_main, MODE_L2_BRIDGE, swi,
 		   bd_index, L2_BD_PORT_TYPE_BVI, 0, 0);
@@ -469,6 +517,7 @@ evpn_vrf_add (u32 table_id, u32 l3_vni, mac_address_t * router_mac_opt)
     evpn_publish_prefix_learn (table_id, &pfx, &v->router_mac, 1);
   }
 
+  EVPN_DBG ("vrf add %U", format_evpn_vrf, v);
   return 0;
 }
 
@@ -482,8 +531,12 @@ evpn_vrf_del (u32 table_id)
 
   p = hash_get (em->vrf_by_table, table_id);
   if (!p)
-    return VNET_API_ERROR_NO_SUCH_ENTRY;
+    {
+      EVPN_WARN ("vrf del table %u not found", table_id);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
   v = pool_elt_at_index (em->vrfs, p[0]);
+  EVPN_DBG ("vrf del %U", format_evpn_vrf, v);
 
   set_int_l2_mode (em->vlib_main, em->vnet_main, MODE_L3, v->bvi_sw_if_index,
 		   0, L2_BD_PORT_TYPE_NORMAL, 0, 0);
@@ -515,7 +568,12 @@ evpn_vtep_add (ip46_address_t * local, ip46_address_t * remote,
   key = evpn_vtep_key (local, remote, is_ip6);
   p = hash_get (em->vtep_by_key, key);
   if (p)
-    return VNET_API_ERROR_VALUE_EXIST;
+    {
+      EVPN_WARN ("vtep add local %U remote %U already exists",
+		 format_ip46_address, local, IP46_TYPE_ANY,
+		 format_ip46_address, remote, IP46_TYPE_ANY);
+      return VNET_API_ERROR_VALUE_EXIST;
+    }
 
   pool_get (em->vteps, vt);
   clib_memset (vt, 0, sizeof (*vt));
@@ -532,6 +590,9 @@ evpn_vtep_add (ip46_address_t * local, ip46_address_t * remote,
       em->default_encap_table_id = encap_table_id;
       em->have_default_local = 1;
     }
+  EVPN_DBG ("vtep add local %U remote %U encap-table %u",
+	    format_ip46_address, local, IP46_TYPE_ANY,
+	    format_ip46_address, remote, IP46_TYPE_ANY, encap_table_id);
   return 0;
 }
 
@@ -542,7 +603,14 @@ evpn_vtep_del (ip46_address_t * local, ip46_address_t * remote, u8 is_ip6)
   uword key = evpn_vtep_key (local, remote, is_ip6);
   uword *p = hash_get (em->vtep_by_key, key);
   if (!p)
-    return VNET_API_ERROR_NO_SUCH_ENTRY;
+    {
+      EVPN_WARN ("vtep del local %U remote %U not found",
+		 format_ip46_address, local, IP46_TYPE_ANY,
+		 format_ip46_address, remote, IP46_TYPE_ANY);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
+  EVPN_DBG ("vtep del local %U remote %U", format_ip46_address, local,
+	    IP46_TYPE_ANY, format_ip46_address, remote, IP46_TYPE_ANY);
   pool_put_index (em->vteps, p[0]);
   hash_unset (em->vtep_by_key, key);
   return 0;
@@ -600,22 +668,37 @@ evpn_mac_add (u32 evi, mac_address_t * mac, ip46_address_t * ip_opt,
 
   p = hash_get (em->evi_by_id, evi);
   if (!p)
-    return VNET_API_ERROR_NO_SUCH_ENTRY;
+    {
+      EVPN_WARN ("mac add evi %u not found", evi);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
   e = pool_elt_at_index (em->evis, p[0]);
 
   mkey = evpn_mac_key (evi, mac);
   if (hash_get (em->mac_by_key, mkey))
-    return VNET_API_ERROR_VALUE_EXIST;
+    {
+      EVPN_WARN ("mac add evi %u mac %U already exists", evi,
+		 format_mac_address_t, mac);
+      return VNET_API_ERROR_VALUE_EXIST;
+    }
 
   rv = evpn_resolve_local_vtep (remote, is_ip6, &local, &encap_fib);
   if (rv)
-    return rv;
+    {
+      EVPN_ERR ("mac add evi %u no local VTEP for remote %U", evi,
+		format_ip46_address, remote, IP46_TYPE_ANY);
+      return rv;
+    }
 
   rv =
     evpn_tunnel_acquire (&local, remote, e->vni, is_ip6, encap_fib, &tidx,
 			 &swi);
   if (rv)
-    return rv;
+    {
+      EVPN_ERR ("mac add evi %u tunnel acquire failed vni %u rv=%d", evi,
+		e->vni, rv);
+      return rv;
+    }
 
   /* Attach tunnel to EVI BD if not already (set_int_l2_mode is idempotent
    * enough for our purposes). */
@@ -652,6 +735,9 @@ evpn_mac_add (u32 evi, mac_address_t * mac, ip46_address_t * ip_opt,
   m->remote = *remote;
   m->tunnel_index = tidx;
   hash_set (em->mac_by_key, mkey, m - em->macs);
+  EVPN_DBG ("mac add evi %u mac %U remote %U sw_if %u%s", evi,
+	    format_mac_address_t, mac, format_ip46_address, remote,
+	    IP46_TYPE_ANY, swi, has_ip ? " (has-ip)" : "");
   return 0;
 }
 
@@ -666,8 +752,13 @@ evpn_mac_del (u32 evi, mac_address_t * mac)
   uword *ep;
 
   if (!p)
-    return VNET_API_ERROR_NO_SUCH_ENTRY;
+    {
+      EVPN_WARN ("mac del evi %u mac %U not found", evi, format_mac_address_t,
+		 mac);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
   m = pool_elt_at_index (em->macs, p[0]);
+  EVPN_DBG ("mac del evi %u mac %U", evi, format_mac_address_t, mac);
 
   ep = hash_get (em->evi_by_id, evi);
   if (ep)
@@ -707,22 +798,37 @@ evpn_imet_add (u32 evi, ip46_address_t * remote)
 
   p = hash_get (em->evi_by_id, evi);
   if (!p)
-    return VNET_API_ERROR_NO_SUCH_ENTRY;
+    {
+      EVPN_WARN ("imet add evi %u not found", evi);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
   e = pool_elt_at_index (em->evis, p[0]);
 
   key = evpn_imet_key (evi, remote, is_ip6);
   if (hash_get (em->imet_by_key, key))
-    return VNET_API_ERROR_VALUE_EXIST;
+    {
+      EVPN_WARN ("imet add evi %u remote %U already exists", evi,
+		 format_ip46_address, remote, IP46_TYPE_ANY);
+      return VNET_API_ERROR_VALUE_EXIST;
+    }
 
   rv = evpn_resolve_local_vtep (remote, is_ip6, &local, &encap_fib);
   if (rv)
-    return rv;
+    {
+      EVPN_ERR ("imet add evi %u no local VTEP for remote %U", evi,
+		format_ip46_address, remote, IP46_TYPE_ANY);
+      return rv;
+    }
 
   rv =
     evpn_tunnel_acquire (&local, remote, e->vni, is_ip6, encap_fib, &tidx,
 			 &swi);
   if (rv)
-    return rv;
+    {
+      EVPN_ERR ("imet add evi %u tunnel acquire failed vni %u rv=%d", evi,
+		e->vni, rv);
+      return rv;
+    }
 
   /* Member of BD → participates in flood list (BUM / Type-3). */
   set_int_l2_mode (em->vlib_main, em->vnet_main, MODE_L2_BRIDGE, swi,
@@ -734,6 +840,8 @@ evpn_imet_add (u32 evi, ip46_address_t * remote)
   im->remote = *remote;
   im->tunnel_index = tidx;
   hash_set (em->imet_by_key, key, im - em->imets);
+  EVPN_DBG ("imet add evi %u remote %U sw_if %u", evi, format_ip46_address,
+	    remote, IP46_TYPE_ANY, swi);
   return 0;
 }
 
@@ -747,8 +855,14 @@ evpn_imet_del (u32 evi, ip46_address_t * remote)
   evpn_imet_t *im;
 
   if (!p)
-    return VNET_API_ERROR_NO_SUCH_ENTRY;
+    {
+      EVPN_WARN ("imet del evi %u remote %U not found", evi,
+		 format_ip46_address, remote, IP46_TYPE_ANY);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
   im = pool_elt_at_index (em->imets, p[0]);
+  EVPN_DBG ("imet del evi %u remote %U", evi, format_ip46_address, remote,
+	    IP46_TYPE_ANY);
   evpn_tunnel_release (im->tunnel_index);
   hash_unset (em->imet_by_key, key);
   pool_put (em->imets, im);
@@ -773,12 +887,19 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
 
   p = hash_get (em->vrf_by_table, table_id);
   if (!p)
-    return VNET_API_ERROR_NO_SUCH_ENTRY;
+    {
+      EVPN_WARN ("prefix add table %u not found", table_id);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
   v = pool_elt_at_index (em->vrfs, p[0]);
 
   key = evpn_prefix_key (table_id, pfx);
   if (hash_get (em->prefix_by_key, key))
-    return VNET_API_ERROR_VALUE_EXIST;
+    {
+      EVPN_WARN ("prefix add table %u %U already exists", table_id,
+		 format_fib_prefix, pfx);
+      return VNET_API_ERROR_VALUE_EXIST;
+    }
 
   rv = evpn_resolve_local_vtep (remote, is_ip6 || !ip46_address_is_ip4 (remote),
 				&local, &encap_fib);
@@ -788,7 +909,11 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
       is_ip6 = !ip46_address_is_ip4 (remote);
       rv = evpn_resolve_local_vtep (remote, is_ip6, &local, &encap_fib);
       if (rv)
-	return rv;
+	{
+	  EVPN_ERR ("prefix add table %u no local VTEP for remote %U",
+		    table_id, format_ip46_address, remote, IP46_TYPE_ANY);
+	  return rv;
+	}
     }
 
   /* L3-VNI tunnel attached to L3 BD */
@@ -796,7 +921,11 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
     evpn_tunnel_acquire (&local, remote, v->l3_vni, is_ip6, encap_fib, &tidx,
 			 &swi);
   if (rv)
-    return rv;
+    {
+      EVPN_ERR ("prefix add table %u tunnel acquire failed l3-vni %u rv=%d",
+		table_id, v->l3_vni, rv);
+      return rv;
+    }
 
   set_int_l2_mode (em->vlib_main, em->vnet_main, MODE_L2_BRIDGE, swi,
 		   v->bd_index, L2_BD_PORT_TYPE_NORMAL, 0, 0);
@@ -837,6 +966,10 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
   pr->tunnel_index = tidx;
   pr->vrf_index = v - em->vrfs;
   hash_set (em->prefix_by_key, key, pr - em->prefixes);
+  EVPN_DBG ("prefix add table %u %U remote %U rmac %U via %U sw_if %u",
+	    table_id, format_fib_prefix, pfx, format_ip46_address, remote,
+	    IP46_TYPE_ANY, format_mac_address_t, router_mac,
+	    format_ip4_address, &overlay_nh, swi);
   return 0;
 }
 
@@ -850,9 +983,14 @@ evpn_prefix_del (u32 table_id, fib_prefix_t * pfx)
   evpn_vrf_t *v;
 
   if (!p)
-    return VNET_API_ERROR_NO_SUCH_ENTRY;
+    {
+      EVPN_WARN ("prefix del table %u %U not found", table_id,
+		 format_fib_prefix, pfx);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
   pr = pool_elt_at_index (em->prefixes, p[0]);
   v = pool_elt_at_index (em->vrfs, pr->vrf_index);
+  EVPN_DBG ("prefix del table %u %U", table_id, format_fib_prefix, pfx);
 
   fib_table_entry_delete (pfx->fp_proto == FIB_PROTOCOL_IP4 ?
 			  v->fib_index4 : v->fib_index6, pfx, em->fib_src);

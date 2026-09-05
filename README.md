@@ -96,11 +96,27 @@ evpn mac add evi <id> mac <mac> [ip <addr>] remote <vtep>
 evpn imet add evi <id> remote <vtep>
 evpn prefix add table <id> <prefix>/<len> remote <vtep> router-mac <mac>
 evpn learn enable|disable
+evpn logging [level <emerg|alert|crit|error|warn|notice|info|debug|disabled>] [syslog-level <level>]
 show evpn [evi|vrf|mac|prefix|tunnel|imet|vtep]
 ```
 
 Matching `… del …` forms remove state. VXLAN tunnels are refcounted per
 `{src,dst,vni}`.
+
+## Logging
+
+The plugin registers VPP log class `evpn`. CRUD and learn events log at
+`debug`; missing objects at `warn`; tunnel / VTEP failures at `error`.
+Default class level follows VPP (`notice`), so debug lines are silent until
+raised:
+
+```
+evpn logging level debug
+# equivalent:
+set logging class evpn level debug
+show logging
+show evpn
+```
 
 ## Datapath model
 

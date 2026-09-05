@@ -126,6 +126,7 @@ define evpn_plugin_get_version
 define evpn_plugin_get_version_reply
 {
   u32 context;
+  i32 retval;
   u32 major;
   u32 minor;
 };
