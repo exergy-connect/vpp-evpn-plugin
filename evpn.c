@@ -774,6 +774,18 @@ evpn_imet_del (u32 evi, ip46_address_t * remote)
   return 0;
 }
 
+static void
+evpn_prefix_complete_overlay_adj (evpn_vrf_t * v, ip4_address_t * overlay_nh,
+				  mac_address_t * router_mac)
+{
+  ip_address_t ipa;
+  u32 stats = ~0;
+
+  ip_address_set (&ipa, overlay_nh, AF_IP4);
+  ip_neighbor_add (&ipa, router_mac, v->bvi_sw_if_index,
+		   IP_NEIGHBOR_FLAG_STATIC, &stats);
+}
+
 int
 evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
 		 mac_address_t * router_mac)
@@ -808,7 +820,11 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
       pr = pool_elt_at_index (em->prefixes, p[0]);
       if (pr->remote.ip4.as_u32 == remote->ip4.as_u32 &&
 	  !memcmp (pr->router_mac.bytes, router_mac->bytes, 6))
-	return 0;
+	{
+	  /* Neighbor before the FIB path leaves arp-ipv4 incomplete. */
+	  evpn_prefix_complete_overlay_adj (v, &pr->overlay_nh4, router_mac);
+	  return 0;
+	}
       evpn_prefix_del (table_id, pfx);
     }
 
@@ -847,16 +863,8 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
 
   overlay_nh = evpn_overlay_nh_from_vtep (remote, is_ip6);
 
-  /* Neighbor on L3 BVI: overlay-nh → remote router-mac */
-  {
-    ip_address_t ipa;
-    u32 stats = ~0;
-    ip_address_set (&ipa, &overlay_nh, AF_IP4);
-    ip_neighbor_add (&ipa, router_mac, v->bvi_sw_if_index,
-		     IP_NEIGHBOR_FLAG_STATIC, &stats);
-  }
-
-  /* FIB: prefix via overlay-nh out L3 BVI */
+  /* FIB first, then neighbor: a pre-existing neighbor does not complete
+     the arp-ipv4 adjacency created by the path add. */
   {
     ip46_address_t nh46 = { };
     nh46.ip4 = overlay_nh;
@@ -866,6 +874,7 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
 			      DPO_PROTO_IP4, &nh46, v->bvi_sw_if_index,
 			      ~0, 1, NULL, FIB_ROUTE_PATH_FLAG_NONE);
   }
+  evpn_prefix_complete_overlay_adj (v, &overlay_nh, router_mac);
 
   pool_get (em->prefixes, pr);
   clib_memset (pr, 0, sizeof (*pr));
