@@ -406,6 +406,8 @@ show_evpn_command_fn (vlib_main_t * vm, unformat_input_t * input,
   evpn_imet_t *im;
   evpn_prefix_t *pr;
   evpn_vtep_t *vt;
+  evpn_gw_mac_t *gm;
+  evpn_gw_ip_t *gi;
   u8 show_evi = 0, show_vrf = 0, show_mac = 0, show_prefix = 0;
   u8 show_tunnel = 0, show_imet = 0, show_vtep = 0, show_all = 1;
 
@@ -457,6 +459,15 @@ show_evpn_command_fn (vlib_main_t * vm, unformat_input_t * input,
       pool_foreach (e, em->evis)
 	{
 	  vlib_cli_output (vm, "  %U", format_evpn_evi, e);
+	}
+      vlib_cli_output (vm, "Protected gateways:");
+      pool_foreach (gm, em->gw_macs)
+	{
+	  vlib_cli_output (vm, "  %U", format_evpn_gw_mac, gm);
+	}
+      pool_foreach (gi, em->gw_ips)
+	{
+	  vlib_cli_output (vm, "  %U", format_evpn_gw_ip, gi);
 	}
     }
   if (show_all || show_vrf)
