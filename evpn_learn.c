@@ -161,17 +161,6 @@ evpn_learn_scan_evi (evpn_evi_t * e)
 }
 
 static void
-evpn_learn_scan_vrf_connected (evpn_vrf_t * v)
-{
-  fib_prefix_t pfx = {
-    .fp_proto = FIB_PROTOCOL_IP4,
-    .fp_len = 32,
-    .fp_addr.ip4.as_u32 = clib_host_to_net_u32 (0xa9fe0001),
-  };
-  evpn_publish_prefix_learn (v->table_id, &pfx, &v->router_mac, 1);
-}
-
-static void
 evpn_ip4_address_cb (ip4_main_t * im, uword opaque, u32 sw_if_index,
 		     ip4_address_t * address, u32 address_length,
 		     u32 if_address_index, u32 is_del)
@@ -534,14 +523,9 @@ evpn_learn_process (vlib_main_t * vm, vlib_node_runtime_t * rt,
 
       {
 	evpn_evi_t *e;
-	evpn_vrf_t *v;
 	pool_foreach (e, em->evis)
 	{
 	  evpn_learn_scan_evi (e);
-	}
-	pool_foreach (v, em->vrfs)
-	{
-	  evpn_learn_scan_vrf_connected (v);
 	}
 	evpn_learn_scan_kernel_routes ();
       }

@@ -11,6 +11,9 @@
 
 # Provisioning layer: run once in a fresh VPP instance.
 ip table add 1
+create loopback interface instance 0
+set interface ip address loop0 10.0.0.1/32
+set interface state loop0 up
 create bridge-domain 10
 bvi create instance 10
 set interface l2 bridge bvi10 10 bvi
@@ -21,7 +24,7 @@ create bridge-domain 10001
 bvi create instance 10001
 set interface l2 bridge bvi10001 10001 bvi
 set interface ip table bvi10001 1
-set interface ip address bvi10001 169.254.0.1/32
+set interface unnumbered bvi10001 use loop0
 set interface state bvi10001 up
 
 # L2 EVI for VLAN 10 / VNI 10010

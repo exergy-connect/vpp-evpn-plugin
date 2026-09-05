@@ -6,5 +6,6 @@
 #
 # L3 path (symmetric IRB):
 #   BVI10 (table 1) → FIB 172.16.20.0/24 via 169.254.x.y
-#   neigh 169.254.x.y → remote rMAC on bvi{10001}
+#   neigh 169.254.x.y → remote rMAC on bvi{10001} (unnumbered to loop0)
 #   L2FIB(bd=10001): rMAC → vxlan(vni=5042 → 10.0.0.2)
+#   traceroute sources the loopback, not a 169.254 on the L3 BVI
