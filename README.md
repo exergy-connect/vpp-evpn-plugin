@@ -33,14 +33,14 @@ The plugin owns EVPN-installed remote MAC entries, routes, neighbors, and
 refcounted VXLAN tunnels. Type-2 and Type-3 updates attach remote tunnels to
 existing L2 domains; Type-5 updates use the existing L3 domain/BVI. Do not also
 provision static VXLAN tunnels for the same local/remote/VNI combinations.
-Local learning is optional (`evpn learn enable`); an external control-plane
-agent still translates events and BGP EVPN updates. The plugin does not speak
-BGP, create Linux interfaces, or configure access VLANs.
+Local learning (`evpn learn enable`) originates local MAC/prefix events and
+installs remote Type-5 from kernel BGP/zebra routes in the dataplane netns.
+The plugin does not speak BGP, create Linux interfaces, or configure access
+VLANs.
 
-This changes the previous implicit-provisioning behavior. Existing CLI/API
-fields remain, but callers must provision infrastructure first. In particular,
-`irb` now means “use the existing BVI.” The lab's module ordering and static
-tunnel generation must follow this ownership model before deployment.
+CLI/API fields are unchanged. Callers provision infrastructure first; `irb`
+means use the existing BVI. Lab module ordering and static tunnel generation
+must follow this ownership model.
 
 ## Layout
 
@@ -170,9 +170,13 @@ explicit `instance` so the agent can resolve `vxlan_tunnel<N>`.
 
 1. Scans EVI L2FIB for dynamic (non-static, non-VXLAN, non-BVI) MACs
 2. Watches IPv4 addresses on IRB / L3 BVIs
+3. Reads FRR/zebra Type-5 from the dataplane netns (`RTPROT_BGP` /
+   `RTPROT_ZEBRA` routes plus neighbour router-MACs) and installs them
+   with `evpn prefix add` (tunnel + L3-BVI neighbour + FIB)
 
 and publishes `evpn_mac_learn_event` / `evpn_prefix_learn_event` to clients
-registered with `want_evpn_learn_events`. The plugin never writes BGP.
+registered with `want_evpn_learn_events`. The plugin does not speak BGP;
+it consumes what the control plane already put in the kernel.
 
 ## Smoke test
 

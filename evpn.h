@@ -101,6 +101,8 @@ typedef struct
   ip4_address_t overlay_nh4;
   u32 tunnel_index;
   u32 vrf_index;		/* pool index into vrfs */
+  u8 from_kernel;		/* installed from FRR/zebra netlink */
+  u32 kernel_gen;
 } evpn_prefix_t;
 
 typedef struct
@@ -136,6 +138,7 @@ typedef struct
   u32 learn_process_node_index;
   uword *learned_mac_seen;	/* evi||mac already advertised */
   uword *learned_pfx_seen;
+  u32 kernel_route_gen;
 
   /* Binary API */
   u16 msg_id_base;

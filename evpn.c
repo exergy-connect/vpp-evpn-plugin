@@ -10,6 +10,7 @@
 #include <vnet/l2/l2_bvi.h>
 #include <vnet/ip-neighbor/ip_neighbor.h>
 #include <vnet/ip/ip4_packet.h>
+#include <string.h>
 
 #include "evpn.h"
 
@@ -801,11 +802,14 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
     return VNET_API_ERROR_NO_SUCH_FIB;
 
   key = evpn_prefix_key (table_id, pfx);
-  if (hash_get (em->prefix_by_key, key))
+  p = hash_get (em->prefix_by_key, key);
+  if (p)
     {
-      EVPN_WARN ("prefix add table %u %U already exists", table_id,
-		 format_fib_prefix, pfx);
-      return VNET_API_ERROR_VALUE_EXIST;
+      pr = pool_elt_at_index (em->prefixes, p[0]);
+      if (pr->remote.ip4.as_u32 == remote->ip4.as_u32 &&
+	  !memcmp (pr->router_mac.bytes, router_mac->bytes, 6))
+	return 0;
+      evpn_prefix_del (table_id, pfx);
     }
 
   rv = evpn_resolve_local_vtep (remote, is_ip6 || !ip46_address_is_ip4 (remote),
@@ -872,6 +876,8 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
   pr->overlay_nh4 = overlay_nh;
   pr->tunnel_index = tidx;
   pr->vrf_index = v - em->vrfs;
+  pr->from_kernel = 0;
+  pr->kernel_gen = 0;
   hash_set (em->prefix_by_key, key, pr - em->prefixes);
   EVPN_DBG ("prefix add table %u %U remote %U rmac %U via %U sw_if %u",
 	    table_id, format_fib_prefix, pfx, format_ip46_address, remote,
