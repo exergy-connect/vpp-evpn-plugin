@@ -5,7 +5,7 @@ neighbors, IP FIB, and refcounted VXLAN tunnels. BGP stays in a userspace
 control plane (FRR, BIRD, or a custom agent). That speaker translates Type-2 /
 Type-3 / Type-5 into this plugin’s CLI or binary API.
 
-**Version 0.2** — VLAN-based EVPN, symmetric IRB (RFC 7432 + RFC 9135), and
+**Version 0.3** — VLAN-based EVPN, symmetric IRB (RFC 7432 + RFC 9135), and
 FRR-style anycast IRB gateway.
 
 ## How it fits on a leaf
@@ -53,8 +53,9 @@ Shared VIP + MAC on the **VLAN IRB BVI** (optional extra MAC via static
 `l2fib add … bvi` or a Linux macvlan on the LCP SVI), same pattern as
 [FRR anycast](https://docs.frrouting.org/en/latest/evpn.html).
 
-On IRB registration and each learn tick the plugin **protects** those MAC/IP
-identities so a remote Type-2 cannot point the gateway at VXLAN:
+On IRB registration (and on `evpn learn sync` / learn enable) the plugin
+**protects** those MAC/IP identities so a remote Type-2 cannot point the
+gateway at VXLAN:
 
 - BVI hardware MAC and addresses  
 - Static L2FIB entries whose output is the BVI  
@@ -113,7 +114,7 @@ Leave tunnel creation to the plugin: do not pre-create the same
 | `evpn mac add evi <id> mac <mac> [ip <addr>] remote <vtep>` | Type-2: VXLAN + L2FIB; optional neighbor on IRB BVI (skipped for local GW). |
 | `evpn imet add evi <id> remote <vtep>` | Type-3: VXLAN on BD flood list. |
 | `evpn prefix add table <id> <pfx>/<len> remote <vtep> router-mac <mac>` | Type-5: L3 VXLAN + FDB + FIB via `169.254.x.y`. |
-| `evpn learn enable\|disable` | Local learn events + kernel Type-5 import. |
+| `evpn learn enable\|disable\|sync` | Local learn events + kernel Type-5 import; `sync` forces a one-shot reconcile. |
 
 Matching `… del …` reverses state. Withdraw children before `evi` / `vrf`
 delete. Tunnels drop when their refcount hits zero.
@@ -132,14 +133,20 @@ control plane (or smoke CLI) → `evpn learn enable`.
 
 ## Learn
 
-With `evpn learn enable` (≈2s scan):
+With `evpn learn enable`, learn is **event-driven** (no periodic table scan):
 
-1. **Local Type-2** — dynamic L2FIB MACs on access ports (skip static /
-   VXLAN / BVI); notify binary-API clients.  
-2. **Local Type-5 candidates** — IPv4 addresses on IRB / L3 BVIs.  
-3. **Remote Type-5** — netlink in netns `dataplane` (else process netns):
-   BGP/zebra unicast routes whose table matches a registered VRF, with a
-   gateway neighbor (router MAC), installed as `evpn prefix add`.  
+1. **Local Type-2** — VPP L2 MAC add/move/delete events on registered EVI
+   bridge-domains (skip static / VXLAN / BVI); notify binary-API clients.  
+2. **Local Type-5 candidates** — IPv4 address add/del callbacks on IRB /
+   L3 BVIs (also refresh anycast GW IP protect).  
+3. **Remote Type-5** — long-lived netlink in netns `dataplane` (else process
+   netns): BGP/zebra route/neigh events for registered VRF tables, installed
+   as `evpn prefix add` (`from_kernel`).  
+4. **Gateway / macvlan** — netlink link/addr for macvlan children of the LCP
+   peer; BVI MAC/IP from `evi add` and address callbacks.  
+
+A full reconcile dump (L2FIB + kernel routes/neigh + GW refresh) runs only on
+`learn enable`, `evpn learn sync`, or netlink overrun (`ENOBUFS`).
 
 Clients subscribe with `want_evpn_learn_events`.
 
@@ -184,7 +191,7 @@ flowchart LR
 evpn.h / evpn.c       object pools, tunnels, gateway protection
 evpn_cli.c            debug CLI
 evpn.api / evpn_api.c binary API + learn events
-evpn_learn.c          L2FIB scan, address callbacks, kernel Type-5, macvlan
+evpn_learn.c          L2 MAC events, address callbacks, netlink Type-5/macvlan
 evpn_plugin.c         VLIB_PLUGIN_REGISTER
 test/                 smoke.cli, registration / multivtep / anycast scripts
 Dockerfile            VPP image + plugin + bird3 + FRR
