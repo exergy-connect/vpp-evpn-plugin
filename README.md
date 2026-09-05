@@ -82,9 +82,12 @@ Rules:
 - `evpn vrf add table T …` requires an existing IPv4 and/or IPv6 table T,
   bridge domain `10000 + T`, and its BVI. That BVI must already be bound to T
   for every address family present at registration. Unnumber the L3 BVI to
-  the node loopback (`set interface unnumbered bvi{10000+T} use loop0`) so
-  IPv4 input is enabled. Traceroute then sources the loopback / VTEP address,
-  not a 169.254 on the transit BVI. The Type-5 overlay next hop in
+  the node loopback IP onto a loopback in that same table (`loop{10000+T}`),
+  then `set interface unnumbered bvi{10000+T} use loop{10000+T}`. VPP rejects
+  unnumbered when the donor is in table 0 (`loop0`, or a VLAN BVI not yet
+  bound to T). Do not LCP the VRF loopback, or FRR will redistribute the
+  VTEP /32 as a tenant prefix. Traceroute sources that VTEP address, not a
+  169.254 on the transit BVI. The Type-5 overlay next hop in
   `169.254.0.0/16` stays internal to the FIB adjacency.
 - Optional `router-mac` is an **assertion** against the existing BVI MAC, not
   a request to change it. Missing objects or mismatched bindings/MACs fail
@@ -105,7 +108,7 @@ Rules:
 | VLAN BD, access ports, L2 tag-rewrite | Exists | Unchanged | Unchanged |
 | VLAN BVI, MAC, tenant address, `ip table` bind | Exists | Unchanged (`router-mac` is checked, not set) | Type-2 with IP: **adds** static neighbor on this BVI |
 | Tenant IP table | Exists | **Lock** (refcount); table itself unchanged | Type-5: **adds** FIB path |
-| L3-VNI BD `10000+table`, L3 BVI unnumbered to loopback | Exists | Unchanged | Type-5: **adds** static L2FIB + overlay neighbor on this BVI |
+| L3-VNI BD `10000+table`, VRF `loop{10000+table}` with VTEP /32, L3 BVI unnumbered to that loop | Exists | Unchanged | Type-5: **adds** static L2FIB + overlay neighbor on this BVI |
 | VXLAN `{src,dst,vni}` | Must **not** exist for the same triple | Still none | **Creates** (refcount++) ; last withdraw **deletes** |
 | Static L2FIB (remote MAC / remote router MAC) | None | None | **Adds** / **deletes** |
 | IMET flood member | BD flood = access + BVI only | None | Type-3: **attaches** VXLAN to BD flood list |
@@ -137,7 +140,7 @@ flowchart TB
     BVI10["BVI10<br/>172.16.10.1/24"]
     T1["IP table 1"]
     BD3["BD 10001"]
-    BVI3["BVI10001 unnumbered → loop0"]
+    BVI3["BVI10001 unnumbered → loop10001"]
     H1 --> BD10
     BVI10 --- BD10
     BVI10 --> T1
@@ -461,7 +464,7 @@ Matching `… del …` forms remove state.
 Suggested bring-up order on a leaf:
 
 1. Underlay (loopback VTEP, IGP).
-2. Tenant IP table, VLAN BDs + BVIs + addresses, L3-VNI BD `10000+table` + BVI unnumbered to the loopback.
+2. Tenant IP table, VLAN BDs + BVIs + addresses, L3-VNI BD `10000+table`, VRF loopback with the VTEP /32, L3 BVI unnumbered to that loopback.
 3. Access / VLAN membership.
 4. `evpn evi add` / `evpn vrf add` / `evpn vtep add`.
 5. Control plane (or smoke CLI) for IMET, MAC, prefix.
