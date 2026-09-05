@@ -9,8 +9,14 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    paths: &trigger-paths
+      - "**/*.c"
+      - "**/*.h"
+      - "**/*.api"
+      - Makefile
   pull_request:
     branches: [main]
+    paths: *trigger-paths
   workflow_dispatch:
     inputs:
       vpp_version:
