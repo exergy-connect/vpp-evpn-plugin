@@ -34,10 +34,14 @@ vpp-evpn-plugin/
 From this directory:
 
 ```bash
-docker build -t vpp-evpn-plugin .
+docker build -t exergy/vpp-with-evpn-plugin .
 # Pin FD.io version (same style as the lab image):
-docker build -t vpp-evpn-plugin --build-arg VPP_VERSION=25.06-release .
+docker build -t exergy/vpp-with-evpn-plugin --build-arg VPP_VERSION=25.06-release .
 ```
+
+CI (`.github/workflows/docker.yml`) builds on `main` / `v*` tags and pushes
+`exergy/vpp-with-evpn-plugin` to Docker Hub. Configure repo secrets
+`DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`. PRs build but do not push.
 
 The image is VPP bookworm + `evpn_plugin.so` enabled. Smoke CLI is at
 `/usr/share/vpp/evpn-smoke.cli`.
@@ -45,7 +49,7 @@ The image is VPP bookworm + `evpn_plugin.so` enabled. Smoke CLI is at
 Extract only the plugin:
 
 ```bash
-id=$(docker create vpp-evpn-plugin)
+id=$(docker create exergy/vpp-with-evpn-plugin)
 docker cp "$id":/usr/lib/x86_64-linux-gnu/vpp_plugins/evpn_plugin.so .
 docker rm "$id"
 ```
