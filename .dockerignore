@@ -1,0 +1,9 @@
+.git
+.gitignore
+build/
+*.so
+*.o
+*.a
+README.md
+Makefile
+.dockerignore

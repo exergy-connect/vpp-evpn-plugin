@@ -1,0 +1,34 @@
+# Smoke CLI — two VPP leaves, L2 EVPN + symmetric IRB
+#
+# Underlay (not shown): loopback VTEPs reachable, e.g.
+#   leaf1 VTEP 10.0.0.1  leaf2 VTEP 10.0.0.2
+#
+# Access ports and IRB SVIs for VLANs are assumed already created
+# (create bridge-domain / bvi / set interface l2 bridge / addresses)
+# OR created via `evpn evi … irb` + manual access-port attach.
+#
+# --- leaf1 (VTEP 10.0.0.1) ---
+
+# L2 EVI for VLAN 10 / VNI 10010
+evpn evi add evi 10 vni 10010 bd 10 irb
+evpn vtep add local 10.0.0.1 remote 10.0.0.2
+evpn imet add evi 10 remote 10.0.0.2
+# Remote host MAC on leaf2 (Type-2)
+evpn mac add evi 10 mac 00:00:00:00:00:22 ip 172.16.10.22 remote 10.0.0.2
+
+# Symmetric IRB VRF (transit VNI 5042, table 1)
+evpn vrf add table 1 l3-vni 5042
+# Remote prefix on leaf2 blue VLAN via leaf2 router-mac
+evpn prefix add table 1 172.16.20.0/24 remote 10.0.0.2 router-mac b0:b0:00:00:00:01
+
+evpn learn enable
+show evpn
+
+# --- leaf2 (VTEP 10.0.0.2) — mirror with locals/remotes swapped ---
+# evpn evi add evi 10 vni 10010 bd 10 irb
+# evpn vtep add local 10.0.0.2 remote 10.0.0.1
+# evpn imet add evi 10 remote 10.0.0.1
+# evpn mac add evi 10 mac 00:00:00:00:00:11 ip 172.16.10.11 remote 10.0.0.1
+# evpn vrf add table 1 l3-vni 5042
+# evpn prefix add table 1 172.16.10.0/24 remote 10.0.0.1 router-mac b0:b0:00:00:00:01
+# evpn learn enable

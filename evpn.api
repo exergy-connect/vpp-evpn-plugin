@@ -1,0 +1,131 @@
+/* Hey Emacs use -*- mode: C -*- */
+/*
+ * Copyright (c) 2026
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ *
+ * Binary API for the EVPN-to-FIB/FDB agent. BGP never enters this API —
+ * a userspace agent translates EVPN RIB ↔ these messages.
+ */
+
+option version = "0.1.0";
+
+import "vnet/ip/ip_types.api";
+import "vnet/ethernet/ethernet_types.api";
+
+autoreply define evpn_evi_add_del
+{
+  u32 client_index;
+  u32 context;
+  bool is_add [default=true];
+  u32 evi;
+  u32 vni;
+  u32 bd_id;
+  bool irb;
+  vl_api_mac_address_t router_mac;
+};
+
+autoreply define evpn_vrf_add_del
+{
+  u32 client_index;
+  u32 context;
+  bool is_add [default=true];
+  u32 table_id;
+  u32 l3_vni;
+  vl_api_mac_address_t router_mac;
+};
+
+autoreply define evpn_vtep_add_del
+{
+  u32 client_index;
+  u32 context;
+  bool is_add [default=true];
+  vl_api_address_t local;
+  vl_api_address_t remote;
+  u32 encap_table_id;
+};
+
+autoreply define evpn_mac_add_del
+{
+  u32 client_index;
+  u32 context;
+  bool is_add [default=true];
+  u32 evi;
+  vl_api_mac_address_t mac;
+  bool has_ip;
+  vl_api_address_t ip;
+  vl_api_address_t remote;
+};
+
+autoreply define evpn_imet_add_del
+{
+  u32 client_index;
+  u32 context;
+  bool is_add [default=true];
+  u32 evi;
+  vl_api_address_t remote;
+};
+
+autoreply define evpn_prefix_add_del
+{
+  u32 client_index;
+  u32 context;
+  bool is_add [default=true];
+  u32 table_id;
+  vl_api_prefix_t prefix;
+  vl_api_address_t remote;
+  vl_api_mac_address_t router_mac;
+};
+
+autoreply define evpn_learn_enable_disable
+{
+  u32 client_index;
+  u32 context;
+  bool enable [default=true];
+};
+
+/** \brief Register for local MAC / prefix learn events (origination). */
+autoreply define want_evpn_learn_events
+{
+  u32 client_index;
+  u32 context;
+  bool enable_disable [default=true];
+  u32 pid;
+};
+
+define evpn_mac_learn_event
+{
+  u32 client_index;
+  u32 pid;
+  u32 evi;
+  vl_api_mac_address_t mac;
+  u32 sw_if_index;
+  bool is_add;
+};
+
+define evpn_prefix_learn_event
+{
+  u32 client_index;
+  u32 pid;
+  u32 table_id;
+  vl_api_prefix_t prefix;
+  vl_api_mac_address_t router_mac;
+  bool is_add;
+};
+
+service {
+  rpc want_evpn_learn_events returns want_evpn_learn_events_reply
+    events evpn_mac_learn_event, evpn_prefix_learn_event;
+};
+
+define evpn_plugin_get_version
+{
+  u32 client_index;
+  u32 context;
+};
+
+define evpn_plugin_get_version_reply
+{
+  u32 context;
+  u32 major;
+  u32 minor;
+};
