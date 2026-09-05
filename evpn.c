@@ -65,13 +65,13 @@ evpn_vxlan_add (ip46_address_t * src, ip46_address_t * dst, u32 vni,
   if (is_ip6)
     cmd =
       format (0,
-	      "create vxlan tunnel src %U dst %U vni %u instance %u encap-vrf-id %u dst-port %u",
+	      "create vxlan tunnel src %U dst %U vni %u instance %u encap-vrf-id %u dst_port %u",
 	      format_ip6_address, &src->ip6, format_ip6_address, &dst->ip6,
 	      vni, instance, table_id, dst_port);
   else
     cmd =
       format (0,
-	      "create vxlan tunnel src %U dst %U vni %u instance %u encap-vrf-id %u dst-port %u",
+	      "create vxlan tunnel src %U dst %U vni %u instance %u encap-vrf-id %u dst_port %u",
 	      format_ip4_address, &src->ip4, format_ip4_address, &dst->ip4,
 	      vni, instance, table_id, dst_port);
 
@@ -504,7 +504,7 @@ evpn_vtep_add (ip46_address_t * local, ip46_address_t * remote,
       em->default_dst_port = dst_port;
       em->have_default_local = 1;
     }
-  EVPN_DBG ("vtep add local %U remote %U encap-table %u dst-port %u",
+  EVPN_DBG ("vtep add local %U remote %U encap-table %u dst_port %u",
 	    format_ip46_address, local, IP46_TYPE_ANY,
 	    format_ip46_address, remote, IP46_TYPE_ANY, encap_table_id,
 	    dst_port);
@@ -973,7 +973,7 @@ u8 *
 format_evpn_tunnel (u8 * s, va_list * args)
 {
   evpn_tunnel_t *t = va_arg (*args, evpn_tunnel_t *);
-  s = format (s, "[%u] src %U dst %U vni %u dst-port %u sw_if %u ref %u",
+  s = format (s, "[%u] src %U dst %U vni %u dst_port %u sw_if %u ref %u",
 	      t - evpn_main.tunnels,
 	      format_ip46_address, &t->src, IP46_TYPE_ANY,
 	      format_ip46_address, &t->dst, IP46_TYPE_ANY,

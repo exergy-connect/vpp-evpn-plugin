@@ -30,7 +30,7 @@
 /* Synthetic overlay NH in 169.254.0.0/16 derived from remote VTEP. */
 #define EVPN_OVERLAY_NH_BASE 0xa9fe0000 /* 169.254.0.0 */
 
-/* IANA VXLAN UDP dest port; used when dst-port is omitted or 0. */
+/* IANA VXLAN UDP dest port; used when dst_port is omitted or 0. */
 #define EVPN_VXLAN_DST_PORT 4789
 
 typedef struct
