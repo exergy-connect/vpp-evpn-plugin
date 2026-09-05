@@ -303,85 +303,66 @@ evpn_tunnel_release (u32 tunnel_index)
   pool_put (em->tunnels, t);
 }
 
+/* Registration borrows infrastructure. The caller owns its lifetime. */
+static int
+evpn_existing_bd (u32 bd_id, u8 need_bvi, u32 *bd_index, u32 *swi,
+                  mac_address_t *mac, mac_address_t *expected_mac)
+{
+  uword *p = hash_get (bd_main.bd_index_by_bd_id, bd_id);
+  if (!p)
+    {
+      EVPN_ERR ("bridge domain %u must exist before registration", bd_id);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
+  *bd_index = p[0];
+  *swi = ~0;
+  if (!need_bvi)
+    return 0;
+  l2_bridge_domain_t *bd = vec_elt_at_index (l2input_main.bd_configs, *bd_index);
+  *swi = bd->bvi_sw_if_index;
+  if (*swi == ~0)
+    {
+      EVPN_ERR ("bridge domain %u requires an existing BVI", bd_id);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
+  vnet_hw_interface_t *hi =
+    vnet_get_sup_hw_interface (evpn_main.vnet_main, *swi);
+  mac_address_from_bytes (mac, hi->hw_address);
+  if (expected_mac && !mac_address_is_zero (expected_mac) &&
+      memcmp (mac, expected_mac, sizeof (*mac)))
+    {
+      EVPN_ERR ("bridge domain %u router MAC does not match existing BVI", bd_id);
+      return VNET_API_ERROR_INVALID_VALUE;
+    }
+  return 0;
+}
+
 int
 evpn_evi_add (u32 evi, u32 vni, u32 bd_id, u8 irb,
-	      mac_address_t * router_mac_opt)
+              mac_address_t *router_mac_opt)
 {
   evpn_main_t *em = &evpn_main;
-  bd_main_t *bdm = &bd_main;
   evpn_evi_t *e;
-  uword *p;
-  u32 bd_index;
-  l2_bridge_domain_add_del_args_t bd_args;
-
+  u32 bd_index, swi;
+  mac_address_t mac = { 0 };
   evpn_feature_init (em);
-
-  p = hash_get (em->evi_by_id, evi);
-  if (p)
-    {
-      EVPN_WARN ("evi add evi %u already exists", evi);
-      return VNET_API_ERROR_VALUE_EXIST;
-    }
-
-  clib_memset (&bd_args, 0, sizeof (bd_args));
-  bd_args.bd_id = bd_id;
-  bd_args.is_add = 1;
-  bd_args.flood = 1;
-  bd_args.uu_flood = 1;
-  bd_args.forward = 1;
-  bd_args.learn = 1;
-  bd_args.arp_term = 0;
-  bd_args.arp_ufwd = 0;
-  bd_add_del (&bd_args);
-
-  bd_index = bd_find_or_add_bd_index (bdm, bd_id);
-
-  pool_get (em->evis, e);
-  clib_memset (e, 0, sizeof (*e));
+  if (hash_get (em->evi_by_id, evi))
+    return VNET_API_ERROR_VALUE_EXIST;
+  int rv = evpn_existing_bd (bd_id, irb, &bd_index, &swi, &mac,
+                            router_mac_opt);
+  if (rv)
+    return rv;
+  pool_get_zero (em->evis, e);
   e->evi = evi;
   e->vni = vni;
   e->bd_id = bd_id;
   e->bd_index = bd_index;
   e->irb = irb;
-  e->bvi_sw_if_index = ~0;
-
-  if (irb)
-    {
-      mac_address_t mac;
-      u32 swi = ~0;
-      int rv;
-
-      if (router_mac_opt && !mac_address_is_zero (router_mac_opt))
-	mac_address_copy (&mac, router_mac_opt);
-      else
-	mac_address_set_zero (&mac);
-
-      rv = l2_bvi_create (bd_id, &mac, &swi);
-      if (rv)
-	{
-	  EVPN_ERR ("evi add evi %u irb bvi create failed bd %u rv=%d", evi,
-		    bd_id, rv);
-	  pool_put (em->evis, e);
-	  return rv;
-	}
-
-      set_int_l2_mode (em->vlib_main, em->vnet_main, MODE_L2_BRIDGE, swi,
-		       bd_index, L2_BD_PORT_TYPE_BVI, 0, 0);
-      vnet_sw_interface_set_flags (em->vnet_main, swi,
-				   VNET_SW_INTERFACE_FLAG_ADMIN_UP);
-
-      e->bvi_sw_if_index = swi;
-      {
-	vnet_hw_interface_t *hi =
-	  vnet_get_sup_hw_interface (em->vnet_main, swi);
-	mac_address_from_bytes (&e->bvi_mac, hi->hw_address);
-      }
-
-      /* Advertise local BVI MAC for Type-2 origination */
-      evpn_publish_mac_learn (evi, &e->bvi_mac, swi, 1 /* is_add */);
-    }
-
+  e->bvi_sw_if_index = swi;
+  e->bvi_mac = mac;
   hash_set (em->evi_by_id, evi, e - em->evis);
+  if (irb)
+    evpn_publish_mac_learn (evi, &e->bvi_mac, swi, 1);
   EVPN_DBG ("evi add %U", format_evpn_evi, e);
   return 0;
 }
@@ -390,133 +371,69 @@ int
 evpn_evi_del (u32 evi)
 {
   evpn_main_t *em = &evpn_main;
-  uword *p;
-  evpn_evi_t *e;
-  l2_bridge_domain_add_del_args_t bd_args;
-
-  p = hash_get (em->evi_by_id, evi);
+  uword *p = hash_get (em->evi_by_id, evi);
+  evpn_mac_t *m;
+  evpn_imet_t *i;
   if (!p)
-    {
-      EVPN_WARN ("evi del evi %u not found", evi);
-      return VNET_API_ERROR_NO_SUCH_ENTRY;
-    }
-  e = pool_elt_at_index (em->evis, p[0]);
-  EVPN_DBG ("evi del %U", format_evpn_evi, e);
-
-  if (e->bvi_sw_if_index != ~0)
-    {
-      evpn_publish_mac_learn (evi, &e->bvi_mac, e->bvi_sw_if_index, 0);
-      set_int_l2_mode (em->vlib_main, em->vnet_main, MODE_L3,
-		       e->bvi_sw_if_index, 0, L2_BD_PORT_TYPE_NORMAL, 0, 0);
-      l2_bvi_delete (e->bvi_sw_if_index);
-    }
-
-  clib_memset (&bd_args, 0, sizeof (bd_args));
-  bd_args.bd_id = e->bd_id;
-  bd_args.is_add = 0;
-  bd_add_del (&bd_args);
-
+    return VNET_API_ERROR_NO_SUCH_ENTRY;
+  /* Require withdrawals first; never leave children with stale references. */
+  pool_foreach (m, em->macs)
+    if (m->evi == evi)
+      return VNET_API_ERROR_INSTANCE_IN_USE;
+  pool_foreach (i, em->imets)
+    if (i->evi == evi)
+      return VNET_API_ERROR_INSTANCE_IN_USE;
+  evpn_evi_t *e = pool_elt_at_index (em->evis, p[0]);
+  if (e->irb)
+    evpn_publish_mac_learn (evi, &e->bvi_mac, e->bvi_sw_if_index, 0);
   hash_unset (em->evi_by_id, evi);
   pool_put (em->evis, e);
   return 0;
 }
 
 int
-evpn_vrf_add (u32 table_id, u32 l3_vni, mac_address_t * router_mac_opt)
+evpn_vrf_add (u32 table_id, u32 l3_vni, mac_address_t *router_mac_opt)
 {
   evpn_main_t *em = &evpn_main;
-  bd_main_t *bdm = &bd_main;
-  evpn_vrf_t *v;
-  uword *p;
-  u32 bd_id, bd_index, swi = ~0;
+  u32 bd_id, bd_index, swi;
   mac_address_t mac;
-  l2_bridge_domain_add_del_args_t bd_args;
-  int rv;
-
+  evpn_vrf_t *v;
   evpn_feature_init (em);
-
-  p = hash_get (em->vrf_by_table, table_id);
-  if (p)
+  if (hash_get (em->vrf_by_table, table_id))
+    return VNET_API_ERROR_VALUE_EXIST;
+  if (table_id > ~0u - EVPN_L3_BD_BASE)
+    return VNET_API_ERROR_INVALID_VALUE;
+  u32 fib4 = fib_table_find (FIB_PROTOCOL_IP4, table_id);
+  u32 fib6 = fib_table_find (FIB_PROTOCOL_IP6, table_id);
+  if (fib4 == ~0 && fib6 == ~0)
     {
-      EVPN_WARN ("vrf add table %u already exists", table_id);
-      return VNET_API_ERROR_VALUE_EXIST;
+      EVPN_ERR ("table %u must exist before VRF registration", table_id);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
     }
-
-  /* Create tenant IP tables */
-  ip_table_create (FIB_PROTOCOL_IP4, table_id, 0 /* is_api */, 0,
-		   (u8 *) "evpn");
-  ip_table_create (FIB_PROTOCOL_IP6, table_id, 0 /* is_api */, 0,
-		   (u8 *) "evpn");
-
   bd_id = EVPN_L3_BD_BASE + table_id;
-  clib_memset (&bd_args, 0, sizeof (bd_args));
-  bd_args.bd_id = bd_id;
-  bd_args.is_add = 1;
-  bd_args.flood = 1;
-  bd_args.uu_flood = 1;
-  bd_args.forward = 1;
-  bd_args.learn = 0;		/* remote rMACs are static */
-  bd_add_del (&bd_args);
-  bd_index = bd_find_or_add_bd_index (bdm, bd_id);
-
-  if (router_mac_opt && !mac_address_is_zero (router_mac_opt))
-    mac_address_copy (&mac, router_mac_opt);
-  else
-    mac_address_set_zero (&mac);
-
-  rv = l2_bvi_create (bd_id, &mac, &swi);
+  int rv = evpn_existing_bd (bd_id, 1, &bd_index, &swi, &mac, router_mac_opt);
   if (rv)
+    return rv;
+  if ((fib4 != ~0 && fib_table_get_index_for_sw_if_index (FIB_PROTOCOL_IP4, swi) != fib4) ||
+      (fib6 != ~0 && fib_table_get_index_for_sw_if_index (FIB_PROTOCOL_IP6, swi) != fib6))
     {
-      EVPN_ERR ("vrf add table %u l3 bvi create failed bd %u rv=%d", table_id,
-		bd_id, rv);
-      return rv;
+      EVPN_ERR ("L3 BVI must already be bound to table %u", table_id);
+      return VNET_API_ERROR_INVALID_VALUE;
     }
-
-  set_int_l2_mode (em->vlib_main, em->vnet_main, MODE_L2_BRIDGE, swi,
-		   bd_index, L2_BD_PORT_TYPE_BVI, 0, 0);
-
-  /* Bind L3 BVI into tenant table and give it a host-only address so
-   * IPv4 input is enabled (same trick as the lab stub). */
-  ip_table_bind (FIB_PROTOCOL_IP4, swi, table_id);
-  ip_table_bind (FIB_PROTOCOL_IP6, swi, table_id);
-  {
-    ip4_address_t host = { .as_u32 = clib_host_to_net_u32 (0xa9fe0001) };
-    ip4_add_del_interface_address (em->vlib_main, swi, &host, 32,
-				   0 /* is_del */);
-  }
-  vnet_sw_interface_set_flags (em->vnet_main, swi,
-			       VNET_SW_INTERFACE_FLAG_ADMIN_UP);
-
-  pool_get (em->vrfs, v);
-  clib_memset (v, 0, sizeof (*v));
+  pool_get_zero (em->vrfs, v);
   v->table_id = table_id;
-  v->fib_index4 =
-    fib_table_find_or_create_and_lock (FIB_PROTOCOL_IP4, table_id,
-				      em->fib_src);
-  v->fib_index6 =
-    fib_table_find_or_create_and_lock (FIB_PROTOCOL_IP6, table_id,
-				      em->fib_src);
+  v->fib_index4 = fib4;
+  v->fib_index6 = fib6;
+  if (fib4 != ~0)
+    fib_table_lock (fib4, FIB_PROTOCOL_IP4, em->fib_src);
+  if (fib6 != ~0)
+    fib_table_lock (fib6, FIB_PROTOCOL_IP6, em->fib_src);
   v->l3_vni = l3_vni;
   v->bd_id = bd_id;
   v->bd_index = bd_index;
   v->bvi_sw_if_index = swi;
-  {
-    vnet_hw_interface_t *hi = vnet_get_sup_hw_interface (em->vnet_main, swi);
-    mac_address_from_bytes (&v->router_mac, hi->hw_address);
-  }
-
+  v->router_mac = mac;
   hash_set (em->vrf_by_table, table_id, v - em->vrfs);
-
-  /* Local router-mac + connected prefixes are Type-5 candidates */
-  {
-    fib_prefix_t pfx = {
-      .fp_proto = FIB_PROTOCOL_IP4,
-      .fp_len = 32,
-      .fp_addr.ip4.as_u32 = clib_host_to_net_u32 (0xa9fe0001),
-    };
-    evpn_publish_prefix_learn (table_id, &pfx, &v->router_mac, 1);
-  }
-
   EVPN_DBG ("vrf add %U", format_evpn_vrf, v);
   return 0;
 }
@@ -525,31 +442,18 @@ int
 evpn_vrf_del (u32 table_id)
 {
   evpn_main_t *em = &evpn_main;
-  uword *p;
-  evpn_vrf_t *v;
-  l2_bridge_domain_add_del_args_t bd_args;
-
-  p = hash_get (em->vrf_by_table, table_id);
+  uword *p = hash_get (em->vrf_by_table, table_id);
+  evpn_prefix_t *prefix;
   if (!p)
-    {
-      EVPN_WARN ("vrf del table %u not found", table_id);
-      return VNET_API_ERROR_NO_SUCH_ENTRY;
-    }
-  v = pool_elt_at_index (em->vrfs, p[0]);
-  EVPN_DBG ("vrf del %U", format_evpn_vrf, v);
-
-  set_int_l2_mode (em->vlib_main, em->vnet_main, MODE_L3, v->bvi_sw_if_index,
-		   0, L2_BD_PORT_TYPE_NORMAL, 0, 0);
-  l2_bvi_delete (v->bvi_sw_if_index);
-
-  clib_memset (&bd_args, 0, sizeof (bd_args));
-  bd_args.bd_id = v->bd_id;
-  bd_args.is_add = 0;
-  bd_add_del (&bd_args);
-
-  fib_table_unlock (v->fib_index4, FIB_PROTOCOL_IP4, em->fib_src);
-  fib_table_unlock (v->fib_index6, FIB_PROTOCOL_IP6, em->fib_src);
-
+    return VNET_API_ERROR_NO_SUCH_ENTRY;
+  pool_foreach (prefix, em->prefixes)
+    if (prefix->table_id == table_id)
+      return VNET_API_ERROR_INSTANCE_IN_USE;
+  evpn_vrf_t *v = pool_elt_at_index (em->vrfs, p[0]);
+  if (v->fib_index4 != ~0)
+    fib_table_unlock (v->fib_index4, FIB_PROTOCOL_IP4, em->fib_src);
+  if (v->fib_index6 != ~0)
+    fib_table_unlock (v->fib_index6, FIB_PROTOCOL_IP6, em->fib_src);
   hash_unset (em->vrf_by_table, table_id);
   pool_put (em->vrfs, v);
   return 0;
@@ -892,6 +796,9 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
       return VNET_API_ERROR_NO_SUCH_ENTRY;
     }
   v = pool_elt_at_index (em->vrfs, p[0]);
+  if ((pfx->fp_proto == FIB_PROTOCOL_IP4 && v->fib_index4 == ~0) ||
+      (pfx->fp_proto == FIB_PROTOCOL_IP6 && v->fib_index6 == ~0))
+    return VNET_API_ERROR_NO_SUCH_FIB;
 
   key = evpn_prefix_key (table_id, pfx);
   if (hash_get (em->prefix_by_key, key))

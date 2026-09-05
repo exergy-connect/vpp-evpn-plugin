@@ -3,7 +3,7 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  *
  * Minimal EVPN-to-FIB/FDB agent for VPP.
- * Composes BD / BVI / VXLAN / L2FIB / IP FIB — no new graph nodes, no BGP.
+ * Borrows BD / BVI; manages VXLAN / L2FIB / IP FIB — no new graph nodes, no BGP.
  */
 #ifndef included_evpn_h
 #define included_evpn_h
@@ -36,7 +36,7 @@ typedef struct
   u32 vni;
   u32 bd_id;
   u32 bd_index;
-  u8 irb;			/* create/bind BVI in this BD */
+  u8 irb;			/* reference existing BVI in this BD */
   u32 bvi_sw_if_index;		/* ~0 if no IRB */
   mac_address_t bvi_mac;
 } evpn_evi_t;

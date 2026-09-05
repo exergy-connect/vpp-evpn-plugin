@@ -3,14 +3,44 @@
 Out-of-tree VPP plugin that is an **EVPN-to-FIB/FDB agent**. It does **not**
 speak BGP or EVPN on the wire. A userspace agent (BIRD `vppevpn`, FRR hook,
 or custom) translates EVPN Type-2 / Type-3 / Type-5 into the CLI / binary API
-below. The plugin only allocates and wires existing VPP objects:
+below. The plugin registers existing VPP infrastructure and programs remote
+reachability into it. No new graph nodes.
 
-- bridge-domains + L2FIB
-- BVI (IRB)
-- VXLAN tunnels (via `vxlan_plugin.so`)
-- IP tables / FIB + IP neighbors
+## Minimal ownership model
 
-No new graph nodes.
+The lab or provisioning system owns bridge domains, BVIs, IP tables, addresses,
+interface state, access ports, tagged VLAN subinterfaces, and LCP peers. Create
+and configure these **before** registering EVIs or VRFs. Registration does not
+create, reconfigure, or delete any of these objects.
+
+- `evpn evi add ... bd N` requires bridge domain N. `irb` also requires a BVI
+  already attached to that domain; it does not create one.
+- `evpn vrf add table T ...` requires an existing IPv4 and/or IPv6 table T,
+  bridge domain `10000 + T`, and its existing BVI. The BVI must already be bound
+  to T for every address family present at registration. Configure addresses
+  and enable the interface in the provisioning layer.
+- Optional `router-mac` is an assertion against the existing BVI MAC, not a
+  request to change it. Missing objects or mismatched bindings/MACs fail
+  registration without provisioning anything.
+- A registration holds references to these objects. Keep them and their
+  bindings/MACs stable until registration is removed. To change them, withdraw
+  remote state, unregister, reconfigure, and register again.
+- Withdraw MAC and IMET entries before deleting an EVI, and prefixes before
+  deleting a VRF. Deletion rejects outstanding children and leaves the BD,
+  BVI, addresses, interface state, and IP tables intact.
+
+The plugin owns EVPN-installed remote MAC entries, routes, neighbors, and
+refcounted VXLAN tunnels. Type-2 and Type-3 updates attach remote tunnels to
+existing L2 domains; Type-5 updates use the existing L3 domain/BVI. Do not also
+provision static VXLAN tunnels for the same local/remote/VNI combinations.
+Local learning is optional (`evpn learn enable`); an external control-plane
+agent still translates events and BGP EVPN updates. The plugin does not speak
+BGP, create Linux interfaces, or configure access VLANs.
+
+This changes the previous implicit-provisioning behavior. Existing CLI/API
+fields remain, but callers must provision infrastructure first. In particular,
+`irb` now means “use the existing BVI.” The lab's module ordering and static
+tunnel generation must follow this ownership model before deployment.
 
 ## Layout
 
@@ -124,7 +154,7 @@ show evpn
 **L2 EVI** — BD = `bd`, per-remote VTEP VXLAN attached to the BD, Type-2 →
 static L2FIB, Type-3 IMET → flood membership, optional IRB BVI + neighbor.
 
-**Symmetric IRB** — tenant IP table + L3-VNI BD with BVI (router-mac). Type-5
+**Symmetric IRB** — existing tenant IP table + L3-VNI BD with BVI (router-mac). Type-5
 installs `prefix via <overlay-nh> bvi_l3` where `overlay-nh` is a synthetic
 `169.254.x.y` derived from the remote VTEP, with neighbor
 `overlay-nh → remote router-mac` on the L3 BVI. Inner Ethernet over the L3 VNI
@@ -153,3 +183,16 @@ IRB programming sequence (run once per leaf with local/remote swapped).
 
 ESI / Type-1 / Type-4, VLAN-aware bundle, asymmetric IRB, multicast underlay,
 MAC→VTEP map inside a single VXLAN interface.
+
+### Registration regression check
+
+With the rebuilt plugin loaded in a fresh disposable VPP container:
+
+```bash
+python3 test/registration.py CONTAINER
+```
+
+This provisions test BDs/BVIs and checks missing prerequisites, MAC and table
+binding validation, IPv4-only registration, preservation after unregister,
+re-registration, and rejection of deletion with outstanding IMET/prefix state.
+Do not run it against a deployed lab.

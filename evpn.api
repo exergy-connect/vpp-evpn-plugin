@@ -12,6 +12,8 @@ option version = "0.1.0";
 import "vnet/ip/ip_types.api";
 import "vnet/ethernet/ethernet_types.api";
 
+/* Register an existing BD and (when irb) its existing BVI.
+ * router_mac, when nonzero, must match the BVI. Delete preserves infrastructure. */
 autoreply define evpn_evi_add_del
 {
   u32 client_index;
@@ -24,6 +26,8 @@ autoreply define evpn_evi_add_del
   vl_api_mac_address_t router_mac;
 };
 
+/* Register existing table(s), BD 10000 + table_id, and its bound BVI.
+ * Withdraw prefixes before unregistering. No infrastructure is provisioned. */
 autoreply define evpn_vrf_add_del
 {
   u32 client_index;

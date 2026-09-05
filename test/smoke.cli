@@ -5,9 +5,24 @@
 #
 # Access ports and IRB SVIs for VLANs are assumed already created
 # (create bridge-domain / bvi / set interface l2 bridge / addresses)
-# OR created via `evpn evi … irb` + manual access-port attach.
+# Plugin registration never creates these objects.
 #
 # --- leaf1 (VTEP 10.0.0.1) ---
+
+# Provisioning layer: run once in a fresh VPP instance.
+ip table add 1
+create bridge-domain 10
+bvi create instance 10
+set interface l2 bridge bvi10 10 bvi
+set interface ip table bvi10 1
+set interface ip address bvi10 172.16.10.1/24
+set interface state bvi10 up
+create bridge-domain 10001
+bvi create instance 10001
+set interface l2 bridge bvi10001 10001 bvi
+set interface ip table bvi10001 1
+set interface ip address bvi10001 169.254.0.1/32
+set interface state bvi10001 up
 
 # L2 EVI for VLAN 10 / VNI 10010
 evpn evi add evi 10 vni 10010 bd 10 irb
