@@ -50,8 +50,9 @@ Pull:
 docker pull ghcr.io/exergy-connect/vpp-with-evpn-plugin:latest
 ```
 
-The image is VPP bookworm + `evpn_plugin.so` enabled. Smoke CLI is at
-`/usr/share/vpp/evpn-smoke.cli`.
+The image is VPP bookworm + `evpn_plugin.so` enabled, plus **bird3** and
+**FRR** (`frr`, `frr-pythontools`) so xForm leaves can run either control
+plane in the dataplane netns. Smoke CLI is at `/usr/share/vpp/evpn-smoke.cli`.
 
 Extract only the plugin:
 

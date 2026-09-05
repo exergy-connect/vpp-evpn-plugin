@@ -94,7 +94,7 @@ ARG DEBIAN_FRONTEND
 ARG REPO
 ARG VPP_VERSION
 
-LABEL description="FD.io VPP with minimal EVPN plugin (L2 + symmetric IRB)"
+LABEL description="FD.io VPP with minimal EVPN plugin (L2 + symmetric IRB) + bird3 + frr"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
 		apt-transport-https \
@@ -127,6 +127,22 @@ RUN set -eux; \
 	mv "${sysctl_bin}.real" "$sysctl_bin"; \
 	rm -f /usr/sbin/policy-rc.d; \
 	dpkg-query -f '${Version}\n' -W vpp > /vpp-version; \
+	rm -rf /var/lib/apt/lists/*
+
+# Control plane for xForm VPP leaves: bird3 (evpn table / protocol evpn) and
+# FRR. Same repos as templates/docker_image/vpp.xpt (bookworm).
+RUN set -eux; \
+	printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d; \
+	chmod +x /usr/sbin/policy-rc.d; \
+	curl -fsSL https://pkg.labs.nic.cz/gpg -o /usr/share/keyrings/cznic-labs-pkg.gpg; \
+	echo "deb [signed-by=/usr/share/keyrings/cznic-labs-pkg.gpg] https://pkg.labs.nic.cz/bird3 bookworm main" \
+		> /etc/apt/sources.list.d/cznic-labs-bird3.list; \
+	curl -fsSL https://deb.frrouting.org/frr/keys.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/frr.gpg; \
+	echo "deb https://deb.frrouting.org/frr bookworm frr-stable" > /etc/apt/sources.list.d/frr.list; \
+	apt-get update; \
+	apt-get install -y --no-install-recommends bird3 frr frr-pythontools; \
+	mkdir -p /etc/bird /run/bird /var/log/frr /var/run/frr; \
+	rm -f /usr/sbin/policy-rc.d; \
 	rm -rf /var/lib/apt/lists/*
 
 # Collect plugin from whichever path cmake installed it to.
