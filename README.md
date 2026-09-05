@@ -395,8 +395,12 @@ is used (including its `dst_port`). Configure VTEPs before installing remote
 state. Tunnel create passes `dst_port` to `create vxlan tunnel` (default
 4789).
 
-**Type-5 overlay next hop:** `169.254.x.y` is hashed from the remote VTEP
-(host byte avoided `.0` / `.255`). It exists only to complete an Ethernet
+**Type-5 overlay next hop:** `169.254.x.y` is allocated per tenant from a
+remote-VTEP-derived starting point (host byte avoids `.0` / `.255`). Collisions
+probe for a free address, so different remote peers cannot overwrite each
+other’s neighbor. Prefixes for the same VTEP/router-MAC share the next hop;
+withdrawal preserves neighbors and router-MAC entries until their last user
+is removed. It exists only to complete an Ethernet
 adjacency on the L3 BVI; it is not a numbered address on that BVI and is not
 advertised as a tenant prefix. ICMP time-exceeded uses the loopback the L3
 BVI is unnumbered to. Re-adding the same prefix/VTEP/router-MAC is idempotent
@@ -599,6 +603,17 @@ Checks missing prerequisites, MAC and table binding validation, IPv4-only
 registration, preservation after unregister, re-registration, and rejection
 of deletion with outstanding IMET/prefix state. Do not run it against a
 deployed lab.
+
+### Multi-VTEP Type-5 regression check
+
+```bash
+python3 test/multivtep.py CONTAINER
+```
+
+Use a fresh disposable VPP container with the rebuilt plugin. This includes
+registration checks, distinct remote VTEPs, deliberate overlay address
+collisions, shared-prefix withdrawal, idempotent updates, route moves, and
+final neighbor/FDB/tunnel cleanup.
 
 ## Non-goals (v0.1)
 

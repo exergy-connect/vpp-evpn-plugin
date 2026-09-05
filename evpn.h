@@ -27,7 +27,7 @@
 /* L3-VNI BD id = base + fib table id (matches lab stub convention). */
 #define EVPN_L3_BD_BASE 10000
 
-/* Synthetic overlay NH in 169.254.0.0/16 derived from remote VTEP. */
+/* Synthetic overlay NH allocation range; unique per peer within a VRF. */
 #define EVPN_OVERLAY_NH_BASE 0xa9fe0000 /* 169.254.0.0 */
 
 /* IANA VXLAN UDP dest port; used when dst_port is omitted or 0. */

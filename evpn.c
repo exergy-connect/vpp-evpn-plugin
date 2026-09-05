@@ -971,7 +971,9 @@ evpn_prefix_del (u32 table_id, fib_prefix_t * pfx)
         ip_neighbor_del (&ipa, v->bvi_sw_if_index);
       }
     if (!mac_used)
-      l2fib_del_entry (pr->router_mac.bytes, v->bd_index, ~0);
+      l2fib_del_entry (pr->router_mac.bytes, v->bd_index,
+                        pool_elt_at_index (em->tunnels,
+                                           pr->tunnel_index)->sw_if_index);
   }
   evpn_tunnel_release (pr->tunnel_index);
 
