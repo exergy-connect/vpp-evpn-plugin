@@ -28,10 +28,19 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/neighbour.h>
+#include <linux/if_link.h>
 
 #ifndef NDA_RTA
 #define NDA_RTA(r) \
   ((struct rtattr *) (((char *) (r)) + NLMSG_ALIGN (sizeof (struct ndmsg))))
+#endif
+#ifndef IFLA_RTA
+#define IFLA_RTA(r) \
+  ((struct rtattr *) (((char *) (r)) + NLMSG_ALIGN (sizeof (struct ifinfomsg))))
+#endif
+#ifndef IFA_RTA
+#define IFA_RTA(r) \
+  ((struct rtattr *) (((char *) (r)) + NLMSG_ALIGN (sizeof (struct ifaddrmsg))))
 #endif
 
 #include "evpn.h"
@@ -218,12 +227,15 @@ evpn_ip4_address_cb (ip4_main_t * im, uword opaque, u32 sw_if_index,
 }
 
 static int
-evpn_nl_open_dataplane (void)
+evpn_nl_open_dataplane_ex (u8 * entered_dataplane)
 {
   int oldfd, nsfd, sock;
   const char *paths[] = { "/run/netns/dataplane", "/var/run/netns/dataplane",
     0 };
   int i;
+
+  if (entered_dataplane)
+    *entered_dataplane = 0;
 
   oldfd = open ("/proc/self/ns/net", O_RDONLY | O_CLOEXEC);
   if (oldfd < 0)
@@ -245,6 +257,8 @@ evpn_nl_open_dataplane (void)
 	  return -1;
 	}
       close (nsfd);
+      if (entered_dataplane)
+	*entered_dataplane = 1;
     }
 
   sock = socket (AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
@@ -257,6 +271,12 @@ evpn_nl_open_dataplane (void)
     }
   close (oldfd);
   return sock;
+}
+
+static int
+evpn_nl_open_dataplane (void)
+{
+  return evpn_nl_open_dataplane_ex (0);
 }
 
 static int
@@ -390,6 +410,209 @@ evpn_kernel_install_prefix (evpn_vrf_t * v, fib_prefix_t * pfx,
   pr = pool_elt_at_index (em->prefixes, p[0]);
   pr->from_kernel = 1;
   pr->kernel_gen = gen;
+}
+
+typedef struct
+{
+  u32 ifindex;
+  u32 parent;
+  u8 is_macvlan;
+  u8 mac[6];
+  u8 have_mac;
+  u8 name[64];
+} evpn_nl_link_t;
+
+static void
+evpn_nl_parse_linkinfo (struct rtattr *rta, int len, u8 * is_macvlan)
+{
+  struct rtattr *tb[IFLA_INFO_MAX + 1];
+  evpn_nl_parse_attrs (rta, len, tb, IFLA_INFO_MAX);
+  if (tb[IFLA_INFO_KIND] && RTA_PAYLOAD (tb[IFLA_INFO_KIND]) >= 7 &&
+      !strncmp ((char *) RTA_DATA (tb[IFLA_INFO_KIND]), "macvlan", 7))
+    *is_macvlan = 1;
+}
+
+static evpn_nl_link_t *
+evpn_nl_parse_links (u8 * buf)
+{
+  evpn_nl_link_t *links = 0;
+  unsigned len = vec_len (buf);
+  struct nlmsghdr *nh = (struct nlmsghdr *) buf;
+
+  for (; NLMSG_OK (nh, len); nh = NLMSG_NEXT (nh, len))
+    {
+      struct ifinfomsg *ifi;
+      struct rtattr *tb[IFLA_MAX + 1];
+      evpn_nl_link_t *l;
+
+      if (nh->nlmsg_type != RTM_NEWLINK)
+	continue;
+      ifi = NLMSG_DATA (nh);
+      evpn_nl_parse_attrs (IFLA_RTA (ifi),
+			   nh->nlmsg_len - NLMSG_LENGTH (sizeof (*ifi)), tb,
+			   IFLA_MAX);
+      vec_add2 (links, l, 1);
+      clib_memset (l, 0, sizeof (*l));
+      l->ifindex = ifi->ifi_index;
+      if (tb[IFLA_ADDRESS] && RTA_PAYLOAD (tb[IFLA_ADDRESS]) >= 6)
+	{
+	  clib_memcpy (l->mac, RTA_DATA (tb[IFLA_ADDRESS]), 6);
+	  l->have_mac = 1;
+	}
+      if (tb[IFLA_LINK] && RTA_PAYLOAD (tb[IFLA_LINK]) >= 4)
+	l->parent = *(u32 *) RTA_DATA (tb[IFLA_LINK]);
+      if (tb[IFLA_IFNAME] && RTA_PAYLOAD (tb[IFLA_IFNAME]) > 0)
+	{
+	  u32 nlen = RTA_PAYLOAD (tb[IFLA_IFNAME]);
+	  if (nlen >= sizeof (l->name))
+	    nlen = sizeof (l->name) - 1;
+	  clib_memcpy (l->name, RTA_DATA (tb[IFLA_IFNAME]), nlen);
+	  l->name[nlen] = 0;
+	}
+      if (tb[IFLA_LINKINFO])
+	evpn_nl_parse_linkinfo (RTA_DATA (tb[IFLA_LINKINFO]),
+				RTA_PAYLOAD (tb[IFLA_LINKINFO]),
+				&l->is_macvlan);
+    }
+  return links;
+}
+
+static void
+evpn_gw_protect_addrs_on_if (u32 evi, u32 ifindex, u8 * abuf,
+			     evpn_gw_src_t src)
+{
+  unsigned len = vec_len (abuf);
+  struct nlmsghdr *nh = (struct nlmsghdr *) abuf;
+
+  for (; NLMSG_OK (nh, len); nh = NLMSG_NEXT (nh, len))
+    {
+      struct ifaddrmsg *ifa;
+      struct rtattr *tb[IFA_MAX + 1];
+      ip46_address_t ip46;
+
+      if (nh->nlmsg_type != RTM_NEWADDR)
+	continue;
+      ifa = NLMSG_DATA (nh);
+      if (ifa->ifa_index != ifindex)
+	continue;
+      if (ifa->ifa_family != AF_INET && ifa->ifa_family != AF_INET6)
+	continue;
+      evpn_nl_parse_attrs (IFA_RTA (ifa),
+			   nh->nlmsg_len - NLMSG_LENGTH (sizeof (*ifa)), tb,
+			   IFA_MAX);
+      if (!tb[IFA_ADDRESS])
+	continue;
+      clib_memset (&ip46, 0, sizeof (ip46));
+      if (ifa->ifa_family == AF_INET)
+	{
+	  if (RTA_PAYLOAD (tb[IFA_ADDRESS]) < 4)
+	    continue;
+	  ip46.ip4.as_u32 = *(u32 *) RTA_DATA (tb[IFA_ADDRESS]);
+	  evpn_gw_protect_ip (evi, &ip46, 0, ifa->ifa_prefixlen, src);
+	}
+      else
+	{
+	  if (RTA_PAYLOAD (tb[IFA_ADDRESS]) < 16)
+	    continue;
+	  clib_memcpy (ip46.ip6.as_u8, RTA_DATA (tb[IFA_ADDRESS]), 16);
+	  evpn_gw_protect_ip (evi, &ip46, 1, ifa->ifa_prefixlen, src);
+	}
+    }
+}
+
+void
+evpn_gw_scan_macvlan (void)
+{
+  evpn_main_t *em = &evpn_main;
+  int sock;
+  u8 entered = 0;
+  u8 *lbuf = 0, *abuf = 0;
+  evpn_nl_link_t *links = 0;
+  evpn_evi_t *e;
+  u32 i, j;
+
+  if (pool_elts (em->evis) == 0)
+    return;
+
+  sock = evpn_nl_open_dataplane_ex (&entered);
+  if (sock < 0)
+    {
+      if (!em->gw_macvlan_skip_logged)
+	{
+	  EVPN_DBG ("gw macvlan skip reason no-dataplane-netns");
+	  em->gw_macvlan_skip_logged = 1;
+	}
+      return;
+    }
+  if (!entered && !em->gw_macvlan_skip_logged)
+    {
+      /* Still scan process netns (lab without named ns); note once. */
+      EVPN_DBG ("gw macvlan scan using process netns (no dataplane ns)");
+      em->gw_macvlan_skip_logged = 1;
+    }
+
+  if (evpn_nl_dump (sock, RTM_GETLINK, AF_UNSPEC, &lbuf) ||
+      evpn_nl_dump (sock, RTM_GETADDR, AF_UNSPEC, &abuf))
+    {
+      close (sock);
+      vec_free (lbuf);
+      vec_free (abuf);
+      return;
+    }
+  close (sock);
+
+  links = evpn_nl_parse_links (lbuf);
+  vec_free (lbuf);
+
+  pool_foreach (e, em->evis)
+  {
+    u32 *parents = 0;
+
+    if (!e->irb || e->bvi_sw_if_index == ~0)
+      continue;
+
+    for (i = 0; i < vec_len (links); i++)
+      {
+	if (!links[i].have_mac)
+	  continue;
+	if (memcmp (links[i].mac, e->bvi_mac.bytes, 6))
+	  continue;
+	vec_add1 (parents, links[i].ifindex);
+      }
+
+    if (vec_len (parents) == 0)
+      continue;
+
+    for (i = 0; i < vec_len (links); i++)
+      {
+	mac_address_t mac;
+	u8 parent_ok = 0;
+
+	if (!links[i].is_macvlan || !links[i].have_mac)
+	  continue;
+	for (j = 0; j < vec_len (parents); j++)
+	  if (links[i].parent == parents[j])
+	    {
+	      parent_ok = 1;
+	      break;
+	    }
+	if (!parent_ok)
+	  continue;
+
+	mac_address_from_bytes (&mac, links[i].mac);
+	EVPN_DBG
+	  ("gw evi %u protect mac %U src macvlan if %s parent ifindex %u",
+	   e->evi, format_mac_address_t, &mac, links[i].name,
+	   links[i].parent);
+	evpn_gw_protect_mac (e->evi, &mac, EVPN_GW_SRC_MACVLAN, 1);
+	evpn_gw_protect_addrs_on_if (e->evi, links[i].ifindex, abuf,
+				     EVPN_GW_SRC_MACVLAN);
+      }
+    vec_free (parents);
+  }
+
+  vec_free (links);
+  vec_free (abuf);
 }
 
 static void
@@ -527,6 +750,7 @@ evpn_learn_process (vlib_main_t * vm, vlib_node_runtime_t * rt,
 	{
 	  evpn_learn_scan_evi (e);
 	}
+	evpn_gw_refresh_all ();
 	evpn_learn_scan_kernel_routes ();
       }
     }

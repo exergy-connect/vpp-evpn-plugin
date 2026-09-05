@@ -10,6 +10,7 @@
 #include <vnet/l2/l2_bvi.h>
 #include <vnet/ip-neighbor/ip_neighbor.h>
 #include <vnet/ip/ip4_packet.h>
+#include <vnet/ip/ip.h>
 #include <string.h>
 
 #include "evpn.h"
@@ -235,11 +236,299 @@ evpn_feature_init (evpn_main_t * em)
   em->mac_by_key = hash_create (0, sizeof (uword));
   em->imet_by_key = hash_create (0, sizeof (uword));
   em->prefix_by_key = hash_create (0, sizeof (uword));
+  em->gw_mac_by_key = hash_create (0, sizeof (uword));
+  em->gw_ip_by_key = hash_create (0, sizeof (uword));
   em->learned_mac_seen = hash_create (0, sizeof (uword));
   em->learned_pfx_seen = hash_create (0, sizeof (uword));
   em->fib_src =
     fib_source_allocate ("evpn", FIB_SOURCE_PRIORITY_HI,
 			 FIB_SOURCE_BH_API);
+}
+
+const char *
+evpn_gw_src_str (evpn_gw_src_t src)
+{
+  switch (src)
+    {
+    case EVPN_GW_SRC_BVI:
+      return "bvi";
+    case EVPN_GW_SRC_L2FIB_BVI:
+      return "l2fib-bvi";
+    case EVPN_GW_SRC_MACVLAN:
+      return "macvlan";
+    default:
+      return "unknown";
+    }
+}
+
+static uword
+evpn_gw_mac_key (u32 evi, const mac_address_t * mac)
+{
+  return (uword) evpn_mac_key (evi, mac);
+}
+
+static uword
+evpn_gw_ip_key (u32 evi, ip46_address_t * ip, u8 is_ip6)
+{
+  return ((uword) evi << 16) ^ evpn_ip46_hash (ip, is_ip6);
+}
+
+int
+evpn_gw_mac_is_protected (u32 evi, mac_address_t * mac)
+{
+  uword *p = hash_get (evpn_main.gw_mac_by_key, evpn_gw_mac_key (evi, mac));
+  return p != 0;
+}
+
+int
+evpn_gw_ip_is_protected (u32 evi, ip46_address_t * ip, u8 is_ip6)
+{
+  uword *p =
+    hash_get (evpn_main.gw_ip_by_key, evpn_gw_ip_key (evi, ip, is_ip6));
+  return p != 0;
+}
+
+void
+evpn_gw_protect_mac (u32 evi, mac_address_t * mac, evpn_gw_src_t src,
+		     u8 install_l2fib)
+{
+  evpn_main_t *em = &evpn_main;
+  uword key = evpn_gw_mac_key (evi, mac);
+  uword *p, *ep;
+  evpn_gw_mac_t *g;
+  evpn_evi_t *e;
+
+  if (mac_address_is_zero (mac))
+    return;
+
+  ep = hash_get (em->evi_by_id, evi);
+  if (!ep)
+    return;
+  e = pool_elt_at_index (em->evis, ep[0]);
+  if (!e->irb || e->bvi_sw_if_index == ~0)
+    return;
+
+  p = hash_get (em->gw_mac_by_key, key);
+  if (p)
+    {
+      g = pool_elt_at_index (em->gw_macs, p[0]);
+      g->gen = em->gw_gen;
+      if (src < g->src)
+	g->src = src;
+      if (install_l2fib && !g->plugin_l2fib)
+	{
+	  l2fib_add_entry (mac->bytes, e->bd_index, e->bvi_sw_if_index,
+			   L2FIB_ENTRY_RESULT_FLAG_STATIC |
+			   L2FIB_ENTRY_RESULT_FLAG_BVI);
+	  g->plugin_l2fib = 1;
+	  EVPN_DBG ("gw evi %u l2fib local mac %U → sw_if %u", evi,
+		    format_mac_address_t, mac, e->bvi_sw_if_index);
+	}
+      return;
+    }
+
+  pool_get_zero (em->gw_macs, g);
+  g->evi = evi;
+  mac_address_copy (&g->mac, mac);
+  g->src = src;
+  g->gen = em->gw_gen;
+  hash_set (em->gw_mac_by_key, key, g - em->gw_macs);
+
+  EVPN_DBG ("gw evi %u protect mac %U src %s sw_if %u", evi,
+	    format_mac_address_t, mac, evpn_gw_src_str (src),
+	    e->bvi_sw_if_index);
+
+  if (install_l2fib || src == EVPN_GW_SRC_BVI || src == EVPN_GW_SRC_MACVLAN)
+    {
+      l2fib_add_entry (mac->bytes, e->bd_index, e->bvi_sw_if_index,
+		       L2FIB_ENTRY_RESULT_FLAG_STATIC |
+		       L2FIB_ENTRY_RESULT_FLAG_BVI);
+      if (src != EVPN_GW_SRC_BVI)
+	{
+	  g->plugin_l2fib = 1;
+	  EVPN_DBG ("gw evi %u l2fib local mac %U → sw_if %u", evi,
+		    format_mac_address_t, mac, e->bvi_sw_if_index);
+	}
+    }
+
+  evpn_publish_mac_learn (evi, mac, e->bvi_sw_if_index, 1);
+}
+
+void
+evpn_gw_protect_ip (u32 evi, ip46_address_t * ip, u8 is_ip6, u8 prefix_len,
+		    evpn_gw_src_t src)
+{
+  evpn_main_t *em = &evpn_main;
+  uword key = evpn_gw_ip_key (evi, ip, is_ip6);
+  uword *p;
+  evpn_gw_ip_t *g;
+
+  if (ip46_address_is_zero (ip))
+    return;
+
+  p = hash_get (em->gw_ip_by_key, key);
+  if (p)
+    {
+      g = pool_elt_at_index (em->gw_ips, p[0]);
+      g->gen = em->gw_gen;
+      if (src < g->src)
+	g->src = src;
+      if (prefix_len && (!g->prefix_len || prefix_len < g->prefix_len))
+	g->prefix_len = prefix_len;
+      return;
+    }
+
+  pool_get_zero (em->gw_ips, g);
+  g->evi = evi;
+  g->ip = *ip;
+  g->is_ip6 = is_ip6;
+  g->prefix_len = prefix_len;
+  g->src = src;
+  g->gen = em->gw_gen;
+  hash_set (em->gw_ip_by_key, key, g - em->gw_ips);
+
+  if (is_ip6)
+    EVPN_DBG ("gw evi %u protect ip %U/%u src %s", evi, format_ip6_address,
+	      &ip->ip6, prefix_len, evpn_gw_src_str (src));
+  else
+    EVPN_DBG ("gw evi %u protect ip %U/%u src %s", evi, format_ip4_address,
+	      &ip->ip4, prefix_len, evpn_gw_src_str (src));
+}
+
+static void
+evpn_gw_protect_bvi_addrs (evpn_evi_t * e)
+{
+  ip4_main_t *im4 = &ip4_main;
+  ip_interface_address_t *ia;
+  ip4_address_t *a4;
+  ip46_address_t ip46;
+
+  if (e->bvi_sw_if_index >= vec_len (im4->fib_index_by_sw_if_index))
+    return;
+
+  foreach_ip_interface_address (&im4->lookup_main, ia, e->bvi_sw_if_index,
+				0 /* continue after first */,
+  ({
+    a4 = ip_interface_address_get_address (&im4->lookup_main, ia);
+    clib_memset (&ip46, 0, sizeof (ip46));
+    ip46.ip4 = *a4;
+    evpn_gw_protect_ip (e->evi, &ip46, 0, ia->address_length, EVPN_GW_SRC_BVI);
+  }));
+}
+
+static void
+evpn_gw_scan_l2fib_bvi (evpn_evi_t * e)
+{
+  l2fib_entry_key_t *keys = 0;
+  l2fib_entry_result_t *results = 0;
+  u32 i;
+
+  l2fib_table_dump (e->bd_index, &keys, &results);
+  for (i = 0; i < vec_len (keys); i++)
+    {
+      l2fib_entry_key_t *k = keys + i;
+      l2fib_entry_result_t *r = results + i;
+      mac_address_t mac;
+
+      if (r->fields.sw_if_index != e->bvi_sw_if_index)
+	continue;
+      if (!l2fib_entry_result_is_set_STATIC (r))
+	continue;
+      mac_address_from_bytes (&mac, k->fields.mac);
+      if (!memcmp (mac.bytes, e->bvi_mac.bytes, 6))
+	continue;
+      evpn_gw_protect_mac (e->evi, &mac, EVPN_GW_SRC_L2FIB_BVI, 0);
+    }
+  vec_free (keys);
+  vec_free (results);
+}
+
+void
+evpn_gw_refresh_evi (evpn_evi_t * e)
+{
+  if (!e->irb || e->bvi_sw_if_index == ~0)
+    return;
+
+  evpn_gw_protect_mac (e->evi, &e->bvi_mac, EVPN_GW_SRC_BVI, 0);
+  evpn_gw_protect_bvi_addrs (e);
+  evpn_gw_scan_l2fib_bvi (e);
+}
+
+static void
+evpn_gw_sweep_stale (void)
+{
+  evpn_main_t *em = &evpn_main;
+  evpn_gw_mac_t *gm;
+  evpn_gw_ip_t *gi;
+  u32 *mac_del = 0, *ip_del = 0;
+  u32 i;
+
+  pool_foreach (gm, em->gw_macs)
+  {
+    if (gm->gen != em->gw_gen)
+      vec_add1 (mac_del, gm - em->gw_macs);
+  }
+  for (i = 0; i < vec_len (mac_del); i++)
+    {
+      uword key;
+      gm = pool_elt_at_index (em->gw_macs, mac_del[i]);
+      EVPN_DBG ("gw evi %u unprotect mac %U src %s", gm->evi,
+		format_mac_address_t, &gm->mac, evpn_gw_src_str (gm->src));
+      if (gm->plugin_l2fib)
+	{
+	  uword *ep = hash_get (em->evi_by_id, gm->evi);
+	  if (ep)
+	    {
+	      evpn_evi_t *e = pool_elt_at_index (em->evis, ep[0]);
+	      l2fib_del_entry (gm->mac.bytes, e->bd_index, e->bvi_sw_if_index);
+	    }
+	}
+      evpn_publish_mac_learn (gm->evi, &gm->mac, ~0, 0);
+      key = evpn_gw_mac_key (gm->evi, &gm->mac);
+      hash_unset (em->gw_mac_by_key, key);
+      pool_put (em->gw_macs, gm);
+    }
+  vec_free (mac_del);
+
+  pool_foreach (gi, em->gw_ips)
+  {
+    if (gi->gen != em->gw_gen)
+      vec_add1 (ip_del, gi - em->gw_ips);
+  }
+  for (i = 0; i < vec_len (ip_del); i++)
+    {
+      uword key;
+      gi = pool_elt_at_index (em->gw_ips, ip_del[i]);
+      if (gi->is_ip6)
+	EVPN_DBG ("gw evi %u unprotect ip %U src %s", gi->evi,
+		  format_ip6_address, &gi->ip.ip6, evpn_gw_src_str (gi->src));
+      else
+	EVPN_DBG ("gw evi %u unprotect ip %U src %s", gi->evi,
+		  format_ip4_address, &gi->ip.ip4, evpn_gw_src_str (gi->src));
+      key = evpn_gw_ip_key (gi->evi, &gi->ip, gi->is_ip6);
+      hash_unset (em->gw_ip_by_key, key);
+      pool_put (em->gw_ips, gi);
+    }
+  vec_free (ip_del);
+}
+
+void
+evpn_gw_refresh_all (void)
+{
+  evpn_main_t *em = &evpn_main;
+  evpn_evi_t *e;
+
+  em->gw_gen++;
+  if (em->gw_gen == 0)
+    em->gw_gen = 1;
+  em->gw_macvlan_skip_logged = 0;
+
+  pool_foreach (e, em->evis)
+  {
+    evpn_gw_refresh_evi (e);
+  }
+  evpn_gw_scan_macvlan ();
+  evpn_gw_sweep_stale ();
 }
 
 int
@@ -394,7 +683,12 @@ evpn_evi_add (u32 evi, u32 vni, u32 bd_id, u8 irb,
   e->bvi_mac = mac;
   hash_set (em->evi_by_id, evi, e - em->evis);
   if (irb)
-    evpn_publish_mac_learn (evi, &e->bvi_mac, swi, 1);
+    {
+      em->gw_gen++;
+      if (em->gw_gen == 0)
+	em->gw_gen = 1;
+      evpn_gw_refresh_evi (e);
+    }
   EVPN_DBG ("evi add %U", format_evpn_evi, e);
   return 0;
 }
@@ -417,7 +711,34 @@ evpn_evi_del (u32 evi)
       return VNET_API_ERROR_INSTANCE_IN_USE;
   evpn_evi_t *e = pool_elt_at_index (em->evis, p[0]);
   if (e->irb)
-    evpn_publish_mac_learn (evi, &e->bvi_mac, e->bvi_sw_if_index, 0);
+    {
+      evpn_gw_mac_t *gm;
+      evpn_gw_ip_t *gi;
+      u32 *mac_del = 0, *ip_del = 0;
+      u32 i;
+      pool_foreach (gm, em->gw_macs)
+	if (gm->evi == evi)
+	  vec_add1 (mac_del, gm - em->gw_macs);
+      for (i = 0; i < vec_len (mac_del); i++)
+	{
+	  gm = pool_elt_at_index (em->gw_macs, mac_del[i]);
+	  hash_unset (em->gw_mac_by_key, evpn_gw_mac_key (evi, &gm->mac));
+	  pool_put (em->gw_macs, gm);
+	}
+      vec_free (mac_del);
+      pool_foreach (gi, em->gw_ips)
+	if (gi->evi == evi)
+	  vec_add1 (ip_del, gi - em->gw_ips);
+      for (i = 0; i < vec_len (ip_del); i++)
+	{
+	  gi = pool_elt_at_index (em->gw_ips, ip_del[i]);
+	  hash_unset (em->gw_ip_by_key,
+		      evpn_gw_ip_key (evi, &gi->ip, gi->is_ip6));
+	  pool_put (em->gw_ips, gi);
+	}
+      vec_free (ip_del);
+      evpn_publish_mac_learn (evi, &e->bvi_mac, e->bvi_sw_if_index, 0);
+    }
   hash_unset (em->evi_by_id, evi);
   pool_put (em->evis, e);
   return 0;
@@ -620,6 +941,14 @@ evpn_mac_add (u32 evi, mac_address_t * mac, ip46_address_t * ip_opt,
     }
   e = pool_elt_at_index (em->evis, p[0]);
 
+  if (evpn_gw_mac_is_protected (evi, mac))
+    {
+      EVPN_DBG ("gw evi %u ignore mac-add mac %U remote %U reason local-gw",
+		evi, format_mac_address_t, mac, format_ip46_address, remote,
+		IP46_TYPE_ANY);
+      return 0;
+    }
+
   mkey = evpn_mac_key (evi, mac);
   if (hash_get (em->mac_by_key, mkey))
     {
@@ -656,18 +985,24 @@ evpn_mac_add (u32 evi, mac_address_t * mac, ip46_address_t * ip_opt,
 
   if (has_ip && ip_opt && e->bvi_sw_if_index != ~0)
     {
-      ip_address_t ipa = { };
-      u32 stats = ~0;
-      if (is_ip6)
+      if (evpn_gw_ip_is_protected (evi, ip_opt, is_ip6))
 	{
-	  ip_address_set (&ipa, &ip_opt->ip6, AF_IP6);
+	  EVPN_DBG
+	    ("gw evi %u ignore neigh ip %U mac %U reason local-gw-ip", evi,
+	     format_ip46_address, ip_opt, IP46_TYPE_ANY,
+	     format_mac_address_t, mac);
 	}
       else
 	{
-	  ip_address_set (&ipa, &ip_opt->ip4, AF_IP4);
+	  ip_address_t ipa = { };
+	  u32 stats = ~0;
+	  if (is_ip6)
+	    ip_address_set (&ipa, &ip_opt->ip6, AF_IP6);
+	  else
+	    ip_address_set (&ipa, &ip_opt->ip4, AF_IP4);
+	  ip_neighbor_add (&ipa, mac, e->bvi_sw_if_index,
+			   IP_NEIGHBOR_FLAG_STATIC, &stats);
 	}
-      ip_neighbor_add (&ipa, mac, e->bvi_sw_if_index,
-		       IP_NEIGHBOR_FLAG_STATIC, &stats);
     }
 
   pool_get (em->macs, m);
@@ -989,6 +1324,29 @@ format_evpn_evi (u8 * s, va_list * args)
   s = format (s, "evi %u vni %u bd %u irb %u bvi %u mac %U",
 	      e->evi, e->vni, e->bd_id, e->irb, e->bvi_sw_if_index,
 	      format_mac_address, e->bvi_mac.bytes);
+  return s;
+}
+
+u8 *
+format_evpn_gw_mac (u8 * s, va_list * args)
+{
+  evpn_gw_mac_t *g = va_arg (*args, evpn_gw_mac_t *);
+  s = format (s, "evi %u mac %U src %s%s", g->evi, format_mac_address_t,
+	      &g->mac, evpn_gw_src_str (g->src),
+	      g->plugin_l2fib ? " (plugin-l2fib)" : "");
+  return s;
+}
+
+u8 *
+format_evpn_gw_ip (u8 * s, va_list * args)
+{
+  evpn_gw_ip_t *g = va_arg (*args, evpn_gw_ip_t *);
+  if (g->is_ip6)
+    s = format (s, "evi %u ip %U/%u src %s", g->evi, format_ip6_address,
+		&g->ip.ip6, g->prefix_len, evpn_gw_src_str (g->src));
+  else
+    s = format (s, "evi %u ip %U/%u src %s", g->evi, format_ip4_address,
+		&g->ip.ip4, g->prefix_len, evpn_gw_src_str (g->src));
   return s;
 }
 

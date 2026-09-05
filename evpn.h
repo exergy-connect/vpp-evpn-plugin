@@ -22,7 +22,7 @@
 #include <vlib/log.h>
 
 #define EVPN_PLUGIN_VERSION_MAJOR 0
-#define EVPN_PLUGIN_VERSION_MINOR 1
+#define EVPN_PLUGIN_VERSION_MINOR 2
 
 /* L3-VNI BD id = base + fib table id (matches lab stub convention). */
 #define EVPN_L3_BD_BASE 10000
@@ -32,6 +32,33 @@
 
 /* IANA VXLAN UDP dest port; used when dst_port is omitted or 0. */
 #define EVPN_VXLAN_DST_PORT 4789
+
+/* How a protected anycast / SVI gateway MAC or IP was inferred. */
+typedef enum
+{
+  EVPN_GW_SRC_BVI = 1,
+  EVPN_GW_SRC_L2FIB_BVI = 2,
+  EVPN_GW_SRC_MACVLAN = 3,
+} evpn_gw_src_t;
+
+typedef struct
+{
+  u32 evi;
+  mac_address_t mac;
+  evpn_gw_src_t src;
+  u8 plugin_l2fib;		/* plugin installed local FDB → BVI */
+  u32 gen;
+} evpn_gw_mac_t;
+
+typedef struct
+{
+  u32 evi;
+  ip46_address_t ip;
+  u8 is_ip6;
+  u8 prefix_len;
+  evpn_gw_src_t src;
+  u32 gen;
+} evpn_gw_ip_t;
 
 typedef struct
 {
@@ -120,6 +147,8 @@ typedef struct
   evpn_mac_t *macs;
   evpn_imet_t *imets;
   evpn_prefix_t *prefixes;
+  evpn_gw_mac_t *gw_macs;	/* protected gateway MACs (anycast / SVI) */
+  evpn_gw_ip_t *gw_ips;		/* protected gateway IPs */
 
   /* Indexes: key → pool index */
   uword *evi_by_id;		/* evi → index */
@@ -129,6 +158,8 @@ typedef struct
   uword *mac_by_key;		/* hash of evi||mac */
   uword *imet_by_key;		/* hash of evi||remote */
   uword *prefix_by_key;		/* hash of table||prefix */
+  uword *gw_mac_by_key;		/* hash of evi||mac → gw_macs index */
+  uword *gw_ip_by_key;		/* hash of evi||ip → gw_ips index */
 
   /* Local VTEP used when creating tunnels (set by first vtep add) */
   ip46_address_t default_local;
@@ -145,6 +176,8 @@ typedef struct
   uword *learned_mac_seen;	/* evi||mac already advertised */
   uword *learned_pfx_seen;
   u32 kernel_route_gen;
+  u32 gw_gen;			/* protected-set refresh generation */
+  u8 gw_macvlan_skip_logged;	/* once-per-cycle macvlan skip */
 
   /* Binary API */
   u16 msg_id_base;
@@ -192,6 +225,18 @@ int evpn_prefix_del (u32 table_id, fib_prefix_t * pfx);
 
 int evpn_learn_enable (u8 enable);
 
+/* Anycast / SVI gateway protection (inferred; no dedicated CLI). */
+const char *evpn_gw_src_str (evpn_gw_src_t src);
+int evpn_gw_mac_is_protected (u32 evi, mac_address_t * mac);
+int evpn_gw_ip_is_protected (u32 evi, ip46_address_t * ip, u8 is_ip6);
+void evpn_gw_protect_mac (u32 evi, mac_address_t * mac, evpn_gw_src_t src,
+			  u8 install_l2fib);
+void evpn_gw_protect_ip (u32 evi, ip46_address_t * ip, u8 is_ip6,
+			 u8 prefix_len, evpn_gw_src_t src);
+void evpn_gw_refresh_evi (evpn_evi_t * e);
+void evpn_gw_refresh_all (void);
+void evpn_gw_scan_macvlan (void);
+
 /* Tunnel refcount helpers */
 int evpn_tunnel_acquire (ip46_address_t * src, ip46_address_t * dst,
 			 u32 vni, u8 is_ip6, u32 encap_fib_index, u16 dst_port,
@@ -207,6 +252,8 @@ void evpn_publish_prefix_learn (u32 table_id, fib_prefix_t * pfx,
 u8 *format_evpn_evi (u8 * s, va_list * args);
 u8 *format_evpn_vrf (u8 * s, va_list * args);
 u8 *format_evpn_tunnel (u8 * s, va_list * args);
+u8 *format_evpn_gw_mac (u8 * s, va_list * args);
+u8 *format_evpn_gw_ip (u8 * s, va_list * args);
 
 void evpn_send_mac_learn_event (u32 evi, mac_address_t * mac, u32 sw_if_index,
 				u8 is_add);

@@ -10,9 +10,9 @@ agent) translates EVPN Type-2 / Type-3 / Type-5 into the CLI / binary API
 below. The plugin then attaches existing VPP objects the way a PE would after
 importing those routes.
 
-Version 0.1. Target datapath is **VLAN-based EVPN** with **symmetric IRB**
-(RFC 7432 + RFC 9135). Asymmetric IRB, ESI / Type-1 / Type-4, and VLAN-aware
-bundle are out of scope.
+Version 0.2. Target datapath is **VLAN-based EVPN** with **symmetric IRB**
+(RFC 7432 + RFC 9135) and **anycast IRB gateway** (FRR-aligned, no ESI).
+Asymmetric IRB, ESI / Type-1 / Type-4, and VLAN-aware bundle are out of scope.
 
 ## Role in the stack
 
@@ -22,7 +22,7 @@ Think of three layers on each leaf:
 | --- | --- | --- |
 | Control plane | FRR or BIRD in the dataplane netns | Underlay IGP, BGP EVPN, Type-2/3/5 import/export |
 | Provisioning | Lab / NMS / `vppctl` before registration | Bridge domains, BVIs, IP tables, access ports, VLAN subifs, LCP, addresses |
-| This plugin | `evpn_plugin.so` | Remote MAC/FDB, IMET flood members, Type-5 prefixes, refcounted VXLAN tunnels |
+| This plugin | `evpn_plugin.so` | Remote MAC/FDB, IMET flood members, Type-5 prefixes, refcounted VXLAN tunnels, anycast/SVI gateway protection |
 
 The plugin never creates Linux interfaces, never configures access VLANs, and
 never speaks MP-BGP. If the control plane has not imported a route, the plugin
@@ -72,6 +72,8 @@ delete it.
 - EVPN-installed remote MAC entries (static L2FIB)
 - Type-5 FIB paths and overlay neighbors
 - refcounted VXLAN tunnels `{src, dst, vni}`
+- Protected anycast / SVI gateway MAC+IP set (inferred; refreshes local
+  L2FIB → BVI so remote Type-2 cannot steal the gateway)
 
 Rules:
 
@@ -81,14 +83,15 @@ Rules:
   the BD and BVI first.
 - `evpn vrf add table T …` requires an existing IPv4 and/or IPv6 table T,
   bridge domain `10000 + T`, and its BVI. That BVI must already be bound to T
-  for every address family present at registration. Unnumber the L3 BVI to
-  the node loopback IP onto a loopback in that same table (`loop{10000+T}`),
-  then `set interface unnumbered bvi{10000+T} use loop{10000+T}`. VPP rejects
+  for every address family present at registration. Unnumber the L3 BVI to a
+  **tenant-table** loopback (`loop{10000+T}`), then
+  `set interface unnumbered bvi{10000+T} use loop{10000+T}`. VPP rejects
   unnumbered when the donor is in table 0 (`loop0`, or a VLAN BVI not yet
-  bound to T). Do not LCP the VRF loopback, or FRR will redistribute the
-  VTEP /32 as a tenant prefix. Traceroute sources that VTEP address, not a
-  169.254 on the transit BVI. The Type-5 overlay next hop in
-  `169.254.0.0/16` stays internal to the FIB adjacency.
+  bound to T). Prefer a **dedicated per-PE tenant /32** on that loopback (see
+  below) — not a copy of the underlay VTEP, and not the anycast VIP. ICMP
+  Time Exceeded on the L3 hop sources the donor address, not a `169.254` on
+  the transit BVI. The Type-5 overlay next hop in `169.254.0.0/16` stays
+  internal to the FIB adjacency.
 - Optional `router-mac` is an **assertion** against the existing BVI MAC, not
   a request to change it. Missing objects or mismatched bindings/MACs fail
   registration and provision nothing.
@@ -101,16 +104,76 @@ Rules:
 - To change BD, BVI, MAC, or table binding: withdraw remote state, unregister,
   reconfigure provisioning, register again.
 
+### Anycast gateway vs L3 unnumbered vs unique tenant /32
+
+These three roles are easy to mix up. Keep them separate (aligned with
+[FRR EVPN anycast](https://docs.frrouting.org/en/latest/evpn.html)):
+
+| Role | What it is | Not |
+| --- | --- | --- |
+| **Anycast gateway** | Shared VIP + MAC on the **VLAN IRB BVI** (or a Linux macvlan on the LCP SVI). Local L2FIB keeps the MAC on the BVI. FRR `advertise-svi-ip` originates Type-2 for SVI MAC/IP. | The L3 VNI BVI or the tenant loopback |
+| **L3 BVI unnumbered** | VPP requirement: the L3 VNI BVI has no tenant IP; the donor must be in the **same IP table** so overlay `169.254` adjacency works and ICMP can source *an* address | The anycast GW; not underlay VTEP identity |
+| **Unique tenant /32** | FRR’s “unique address on the L2VNI if the PE must be reachable in the overlay” — for traceroute / source validation | Copy of `loop0` / VTEP into the tenant; not the anycast VIP |
+
+**Anycast dataplane (plugin inference, no `evpn gateway` CLI).** On IRB
+`evi add` and on each learn tick the plugin builds a protected set from:
+
+1. the IRB BVI hardware MAC and its addresses
+2. static L2FIB entries whose output is that BVI (provisioning
+   `l2fib add <mac> <bd> <bvi>`)
+3. Linux macvlan slaves of the LCP host-if for that BVI (same MAC as the BVI
+   on the parent), discovered via netlink in the dataplane netns
+
+Remote `evpn mac add` for a protected MAC is ignored (no VXLAN FDB). A
+Type-2 IP that matches a protected address skips `ip_neighbor_add`. The
+plugin does **not** parse `frr.conf`; `advertise-svi-ip` advertises all SVI
+MAC/IPs and does not mark anycast.
+
+Keep the **L3 VNI router MAC unique per PE**. Sharing it would collide Type-5
+L2FIB the same way an unprotected anycast MAC does.
+
+**Unique tenant /32 on the unnumbered donor.** Copying the underlay VTEP
+`/32` onto `loop{10000+T}` is a lab shortcut, not FRR practice. Prefer a
+dedicated per-PE address (example `10.255.0.1/32` on leaf1). Advertise it as
+Type-5 only if traceroute or peer source-validation needs it — same role as
+FRR’s unique SVI `/32`, not as the gateway. The anycast subnet stays on the
+VLAN BVI; Type-5 of the connected `/24` is the speaker’s
+`redistribute connected` / `advertise ipv4 unicast`.
+
+Expose the donor through LCP, attach its Linux peer to the matching tenant
+VRF, and export the connected `/32`:
+
+```sh
+vppctl lcp create loop10001 host-if diag1 netns dataplane
+ip -n dataplane link set diag1 master tenant
+ip -n dataplane link set diag1 up
+```
+
+```text
+router bgp 65000 vrf tenant
+ address-family ipv4 unicast
+  redistribute connected
+ exit-address-family
+ address-family l2vpn evpn
+  advertise ipv4 unicast
+ exit-address-family
+```
+
+If redistribution uses a route-map, permit the diagnostic `/32`. Keep
+synthetic `169.254.x.y` next hops internal. Plugin prefix-learn events do
+not configure FRR export.
+
 ### Exists vs what the plugin changes
 
 | Object | After provisioning | `evi` / `vrf` / `vtep` add | Type-2 / Type-3 / Type-5 |
 | --- | --- | --- | --- |
 | VLAN BD, access ports, L2 tag-rewrite | Exists | Unchanged | Unchanged |
-| VLAN BVI, MAC, tenant address, `ip table` bind | Exists | Unchanged (`router-mac` is checked, not set) | Type-2 with IP: **adds** static neighbor on this BVI |
+| VLAN BVI, MAC, tenant address, `ip table` bind | Exists | Unchanged (`router-mac` is checked, not set); IRB **protects** BVI MAC/IPs | Type-2 with IP: **adds** static neighbor unless IP is a local GW address |
+| Static L2FIB → BVI (anycast extra MAC) | Optional | **Inferred** into protected set; may refresh L2FIB → BVI | Remote Type-2 for that MAC: **ignored** |
 | Tenant IP table | Exists | **Lock** (refcount); table itself unchanged | Type-5: **adds** FIB path |
-| L3-VNI BD `10000+table`, VRF `loop{10000+table}` with VTEP /32, L3 BVI unnumbered to that loop | Exists | Unchanged | Type-5: **adds** static L2FIB + overlay neighbor on this BVI |
+| L3-VNI BD `10000+table`, VRF `loop{10000+table}` with unique tenant /32, L3 BVI unnumbered to that loop | Exists | Unchanged | Type-5: **adds** static L2FIB + overlay neighbor on this BVI |
 | VXLAN `{src,dst,vni}` | Must **not** exist for the same triple | Still none | **Creates** (refcount++) ; last withdraw **deletes** |
-| Static L2FIB (remote MAC / remote router MAC) | None | None | **Adds** / **deletes** |
+| Static L2FIB (remote MAC / remote router MAC) | None | None | **Adds** / **deletes** (skipped for protected GW MACs) |
 | IMET flood member | BD flood = access + BVI only | None | Type-3: **attaches** VXLAN to BD flood list |
 | Overlay NH `169.254.x.y` | Not used | None | Type-5: **derived** from remote VTEP; not a real host |
 | Underlay (loopback, IGP, encap table) | Exists | `vtep add` records local src / encap table | Tunnels encaps toward that src |
@@ -470,7 +533,11 @@ Matching `… del …` forms remove state.
 Suggested bring-up order on a leaf:
 
 1. Underlay (loopback VTEP, IGP).
-2. Tenant IP table, VLAN BDs + BVIs + addresses, L3-VNI BD `10000+table`, VRF loopback with the VTEP /32, L3 BVI unnumbered to that loopback.
+2. Tenant IP table, VLAN BDs + BVIs + addresses (anycast VIP/MAC on the VLAN
+   BVI if used), L3-VNI BD `10000+table`, unique per-PE tenant `/32` on
+   `loop{10000+table}`, L3 BVI unnumbered to that loopback. Expose the
+   loopback through LCP in the matching Linux VRF if you need Type-5 of that
+   `/32` for traceroute.
 3. Access / VLAN membership.
 4. `evpn evi add` / `evpn vrf add` / `evpn vtep add`.
 5. Control plane (or smoke CLI) for IMET, MAC, prefix.
@@ -512,6 +579,21 @@ show logging
 show evpn
 ```
 
+### Anycast / gateway traces
+
+Gateway inference and Type-2 ignore decisions use a stable `gw` prefix so
+`log | grep gw` is enough. Enable debug as above. Examples:
+
+```
+gw evi 10 protect mac 02:00:ca:fe:00:ff src bvi sw_if 5
+gw evi 10 protect ip 10.10.10.1/24 src bvi
+gw evi 10 protect mac aa:bb:cc:dd:ee:ff src l2fib-bvi
+gw evi 10 ignore mac-add mac 02:00:ca:fe:00:ff remote 10.0.0.2 reason local-gw
+gw evi 10 ignore neigh ip 10.10.10.1 mac … reason local-gw-ip
+```
+
+`show evpn` / `show evpn evi` lists the protected MAC/IP set with source tags
+(`bvi`, `l2fib-bvi`, `macvlan`).
 ## Layout
 
 ```
@@ -523,6 +605,7 @@ vpp-evpn-plugin/
   evpn_cli.c               # debug CLI
   evpn.api / evpn_api.c    # binary API + learn events
   evpn_learn.c             # L2FIB scan + address callbacks + kernel Type-5
+                           # + anycast/SVI gateway inference (macvlan/netlink)
   evpn_plugin.c            # VLIB_PLUGIN_REGISTER
   test/smoke.cli           # example two-leaf L2 + IRB sequence
 ```
@@ -615,7 +698,17 @@ registration checks, distinct remote VTEPs, deliberate overlay address
 collisions, shared-prefix withdrawal, idempotent updates, route moves, and
 final neighbor/FDB/tunnel cleanup.
 
-## Non-goals (v0.1)
+### Anycast gateway regression check
+
+```bash
+python3 test/anycast.py CONTAINER
+```
+
+Shared BVI MAC/IP must stay local when a remote Type-2 for that MAC is
+pushed; an extra static `l2fib add … bvi` MAC is protected the same way;
+host Type-2 still installs to VXLAN.
+
+## Non-goals (v0.2)
 
 - ESI, Type-1, Type-4, all-active / single-active MH
 - VLAN-aware bundle (one VNI, many VLANs)
@@ -623,5 +716,8 @@ final neighbor/FDB/tunnel cleanup.
 - Multicast underlay (BUM is ingress replication via IMET)
 - MAC→VTEP map inside a single VXLAN interface
 - Plugin-owned BD/BVI/table/address provisioning
+- FRR config parsing (gateway MAC/IP is inferred from VPP + Linux objects)
 - IPv6 kernel Type-5 import (IPv6 tables can still be registered and
   programmed via CLI/API)
+
+Anycast IRB gateway (without multi-homing) is **in scope**.

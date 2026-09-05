@@ -16,7 +16,8 @@ set interface ip address loop0 10.0.0.1/32
 set interface state loop0 up
 create loopback interface instance 10001
 set interface ip table loop10001 1
-set interface ip address loop10001 10.0.0.1/32
+# Unique per-PE tenant /32 (FRR-style); not a copy of the underlay VTEP.
+set interface ip address loop10001 10.255.0.1/32
 set interface state loop10001 up
 create bridge-domain 10 learn 1 forward 1 uu-flood 0 flood 1 arp-term 1
 bvi create instance 10
