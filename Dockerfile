@@ -132,13 +132,21 @@ RUN set -eux; \
 
 COPY test/smoke.cli /usr/share/vpp/evpn-smoke.cli
 
+# Log to stderr (and disable syslog) so `docker logs` shows VPP output.
+# nodaemon keeps VPP in the foreground as the container PID.
 RUN mkdir -p /etc/vpp /run/vpp /var/log/vpp && \
 	printf '%s\n' \
 		'unix {' \
 		'  nodaemon' \
-		'  log /var/log/vpp/vpp.log' \
+		'  nosyslog' \
+		'  log /dev/stderr' \
 		'  full-coredump' \
 		'  cli-listen /run/vpp/cli.sock' \
+		'  cli-no-banner' \
+		'}' \
+		'logging {' \
+		'  default-log-level info' \
+		'  default-syslog-log-level info' \
 		'}' \
 		'api-trace { on }' \
 		'plugins {' \
