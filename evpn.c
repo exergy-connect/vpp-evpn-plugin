@@ -224,12 +224,21 @@ evpn_overlay_nh_allocate (u32 table_id, ip46_address_t * remote,
   return VNET_API_ERROR_LIMIT_EXCEEDED;
 }
 
+static void evpn_feature_init (evpn_main_t * em);
+
+void
+evpn_ensure_pools (void)
+{
+  evpn_feature_init (&evpn_main);
+}
+
 static void
 evpn_feature_init (evpn_main_t * em)
 {
   if (em->evi_by_id)
     return;
   em->evi_by_id = hash_create (0, sizeof (uword));
+  em->evi_by_bd = hash_create (0, sizeof (uword));
   em->vrf_by_table = hash_create (0, sizeof (uword));
   em->vtep_by_key = hash_create (0, sizeof (uword));
   em->tunnel_by_key = hash_create (0, sizeof (uword));
@@ -238,8 +247,15 @@ evpn_feature_init (evpn_main_t * em)
   em->prefix_by_key = hash_create (0, sizeof (uword));
   em->gw_mac_by_key = hash_create (0, sizeof (uword));
   em->gw_ip_by_key = hash_create (0, sizeof (uword));
+  em->kernel_neigh = hash_create (0, sizeof (uword));
+  em->nl_if_mac = hash_create (0, sizeof (uword));
+  em->nl_macvlan_parent = hash_create (0, sizeof (uword));
   em->learned_mac_seen = hash_create (0, sizeof (uword));
   em->learned_pfx_seen = hash_create (0, sizeof (uword));
+  em->nl_fd = -1;
+  em->nl_file_index = ~0;
+  em->mac_evt_fd = -1;
+  em->mac_evt_file_index = ~0;
   em->fib_src =
     fib_source_allocate ("evpn", FIB_SOURCE_PRIORITY_HI,
 			 FIB_SOURCE_BH_API);
@@ -393,6 +409,61 @@ evpn_gw_protect_ip (u32 evi, ip46_address_t * ip, u8 is_ip6, u8 prefix_len,
   else
     EVPN_DBG ("gw evi %u protect ip %U/%u src %s", evi, format_ip4_address,
 	      &ip->ip4, prefix_len, evpn_gw_src_str (src));
+}
+
+void
+evpn_gw_unprotect_mac (u32 evi, mac_address_t * mac, evpn_gw_src_t src)
+{
+  evpn_main_t *em = &evpn_main;
+  uword key = evpn_gw_mac_key (evi, mac);
+  uword *p;
+  evpn_gw_mac_t *g;
+
+  p = hash_get (em->gw_mac_by_key, key);
+  if (!p)
+    return;
+  g = pool_elt_at_index (em->gw_macs, p[0]);
+  if (src && g->src != src)
+    return;
+  EVPN_DBG ("gw evi %u unprotect mac %U src %s", evi, format_mac_address_t,
+	    mac, evpn_gw_src_str (g->src));
+  if (g->plugin_l2fib)
+    {
+      uword *ep = hash_get (em->evi_by_id, evi);
+      if (ep)
+	{
+	  evpn_evi_t *e = pool_elt_at_index (em->evis, ep[0]);
+	  l2fib_del_entry (g->mac.bytes, e->bd_index, e->bvi_sw_if_index);
+	}
+    }
+  evpn_publish_mac_learn (evi, mac, ~0, 0);
+  hash_unset (em->gw_mac_by_key, key);
+  pool_put (em->gw_macs, g);
+}
+
+void
+evpn_gw_unprotect_ip (u32 evi, ip46_address_t * ip, u8 is_ip6,
+		      evpn_gw_src_t src)
+{
+  evpn_main_t *em = &evpn_main;
+  uword key = evpn_gw_ip_key (evi, ip, is_ip6);
+  uword *p;
+  evpn_gw_ip_t *g;
+
+  p = hash_get (em->gw_ip_by_key, key);
+  if (!p)
+    return;
+  g = pool_elt_at_index (em->gw_ips, p[0]);
+  if (src && g->src != src)
+    return;
+  if (is_ip6)
+    EVPN_DBG ("gw evi %u unprotect ip %U src %s", evi, format_ip6_address,
+	      &ip->ip6, evpn_gw_src_str (g->src));
+  else
+    EVPN_DBG ("gw evi %u unprotect ip %U src %s", evi, format_ip4_address,
+	      &ip->ip4, evpn_gw_src_str (g->src));
+  hash_unset (em->gw_ip_by_key, key);
+  pool_put (em->gw_ips, g);
 }
 
 static void
@@ -682,6 +753,7 @@ evpn_evi_add (u32 evi, u32 vni, u32 bd_id, u8 irb,
   e->bvi_sw_if_index = swi;
   e->bvi_mac = mac;
   hash_set (em->evi_by_id, evi, e - em->evis);
+  hash_set (em->evi_by_bd, bd_index, evi);
   if (irb)
     {
       em->gw_gen++;
@@ -739,6 +811,7 @@ evpn_evi_del (u32 evi)
       vec_free (ip_del);
       evpn_publish_mac_learn (evi, &e->bvi_mac, e->bvi_sw_if_index, 0);
     }
+  hash_unset (em->evi_by_bd, e->bd_index);
   hash_unset (em->evi_by_id, evi);
   pool_put (em->evis, e);
   return 0;

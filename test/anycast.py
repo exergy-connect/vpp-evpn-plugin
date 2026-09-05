@@ -7,7 +7,6 @@ Provisions borrowed infrastructure; do not run against a deployed lab.
 import re
 import subprocess
 import sys
-import time
 
 container = sys.argv[1]
 
@@ -102,8 +101,7 @@ assert_on_vxlan(HOST_MAC, 'host Type-2')
 
 # Extra static L2FIB → BVI (macvlan analog without Linux).
 cli(f'l2fib add {EXTRA_MAC} 10 bvi10 bvi')
-# Learn tick refreshes protected set (~2s).
-time.sleep(3)
+cli('evpn learn sync')
 show = cli('show evpn evi')
 assert 'src l2fib-bvi' in show or EXTRA_MAC in show.lower()
 cli(f'evpn mac add evi 10 mac {EXTRA_MAC} remote 10.0.0.2')

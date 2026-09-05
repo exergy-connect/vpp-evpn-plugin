@@ -369,6 +369,7 @@ evpn_learn_command_fn (vlib_main_t * vm, unformat_input_t * input,
 		       vlib_cli_command_t * cmd)
 {
   u8 enable = 1;
+  u8 sync = 0;
   int rv;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
@@ -377,9 +378,17 @@ evpn_learn_command_fn (vlib_main_t * vm, unformat_input_t * input,
 	enable = 1;
       else if (unformat (input, "disable"))
 	enable = 0;
+      else if (unformat (input, "sync"))
+	sync = 1;
       else
 	return clib_error_return (0, "unknown input `%U'",
 				  format_unformat_error, input);
+    }
+
+  if (sync)
+    {
+      evpn_learn_sync ();
+      return 0;
     }
 
   rv = evpn_learn_enable (enable);
@@ -390,7 +399,7 @@ evpn_learn_command_fn (vlib_main_t * vm, unformat_input_t * input,
 
 VLIB_CLI_COMMAND (evpn_learn_command, static) = {
   .path = "evpn learn",
-  .short_help = "evpn learn enable | disable",
+  .short_help = "evpn learn enable | disable | sync",
   .function = evpn_learn_command_fn,
 };
 

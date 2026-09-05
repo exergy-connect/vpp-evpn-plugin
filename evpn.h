@@ -20,9 +20,10 @@
 #include <vppinfra/error.h>
 #include <vppinfra/hash.h>
 #include <vlib/log.h>
+#include <svm/queue.h>
 
 #define EVPN_PLUGIN_VERSION_MAJOR 0
-#define EVPN_PLUGIN_VERSION_MINOR 2
+#define EVPN_PLUGIN_VERSION_MINOR 3
 
 /* L3-VNI BD id = base + fib table id (matches lab stub convention). */
 #define EVPN_L3_BD_BASE 10000
@@ -152,6 +153,7 @@ typedef struct
 
   /* Indexes: key → pool index */
   uword *evi_by_id;		/* evi → index */
+  uword *evi_by_bd;		/* bd_index → evi id */
   uword *vrf_by_table;		/* table_id → index */
   uword *vtep_by_key;		/* hash of local||remote */
   uword *tunnel_by_key;		/* hash of src||dst||vni */
@@ -160,6 +162,9 @@ typedef struct
   uword *prefix_by_key;		/* hash of table||prefix */
   uword *gw_mac_by_key;		/* hash of evi||mac → gw_macs index */
   uword *gw_ip_by_key;		/* hash of evi||ip → gw_ips index */
+  uword *kernel_neigh;		/* IPv4 via → packed router MAC */
+  uword *nl_if_mac;		/* ifindex → packed MAC (dataplane links) */
+  uword *nl_macvlan_parent;	/* macvlan ifindex → parent ifindex */
 
   /* Local VTEP used when creating tunnels (set by first vtep add) */
   ip46_address_t default_local;
@@ -170,7 +175,7 @@ typedef struct
 
   fib_source_t fib_src;
 
-  /* Learn / origination */
+  /* Learn / origination (event-driven; reconcile on enable / overrun) */
   u8 learn_enabled;
   u32 learn_process_node_index;
   uword *learned_mac_seen;	/* evi||mac already advertised */
@@ -178,6 +183,18 @@ typedef struct
   u32 kernel_route_gen;
   u32 gw_gen;			/* protected-set refresh generation */
   u8 gw_macvlan_skip_logged;	/* once-per-cycle macvlan skip */
+
+  /* Long-lived dataplane netlink */
+  int nl_fd;
+  u32 nl_file_index;
+  u32 nl_seq;
+
+  /* In-process L2 MAC event client (want_l2_macs_events machinery) */
+  svm_queue_t *mac_evt_queue;
+  u32 mac_evt_client_index;
+  int mac_evt_fd;
+  u32 mac_evt_file_index;
+  u8 mac_evt_registered;
 
   /* Binary API */
   u16 msg_id_base;
@@ -224,6 +241,8 @@ int evpn_prefix_add (u32 table_id, fib_prefix_t * pfx,
 int evpn_prefix_del (u32 table_id, fib_prefix_t * pfx);
 
 int evpn_learn_enable (u8 enable);
+void evpn_learn_sync (void);
+void evpn_ensure_pools (void);
 
 /* Anycast / SVI gateway protection (inferred; no dedicated CLI). */
 const char *evpn_gw_src_str (evpn_gw_src_t src);
@@ -233,6 +252,9 @@ void evpn_gw_protect_mac (u32 evi, mac_address_t * mac, evpn_gw_src_t src,
 			  u8 install_l2fib);
 void evpn_gw_protect_ip (u32 evi, ip46_address_t * ip, u8 is_ip6,
 			 u8 prefix_len, evpn_gw_src_t src);
+void evpn_gw_unprotect_mac (u32 evi, mac_address_t * mac, evpn_gw_src_t src);
+void evpn_gw_unprotect_ip (u32 evi, ip46_address_t * ip, u8 is_ip6,
+			   evpn_gw_src_t src);
 void evpn_gw_refresh_evi (evpn_evi_t * e);
 void evpn_gw_refresh_all (void);
 void evpn_gw_scan_macvlan (void);
