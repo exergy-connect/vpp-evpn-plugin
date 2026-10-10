@@ -3,7 +3,7 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  *
  * Minimal EVPN-to-FIB/FDB agent for VPP.
- * Borrows BD / BVI; manages VXLAN / L2FIB / IP FIB — no new graph nodes, no BGP.
+ * Borrows BD / BVI; manages VXLAN / native SRv6 / L2FIB / IP FIB; no BGP.
  */
 #ifndef included_evpn_h
 #define included_evpn_h
@@ -303,6 +303,10 @@ void evpn_send_prefix_learn_event (u32 table_id, fib_prefix_t * pfx,
 int evpn_srv6_service_add(u32 evi, u32 bd_id, ip6_address_t *source,
                          ip6_address_t *unicast, ip6_address_t *multicast);
 int evpn_srv6_service_del(u32 evi);
+int evpn_srv6_service_exists(u32 evi);
+int evpn_srv6_flush(u32 evi);
+void evpn_frr_mac(u32 evi, mac_address_t *mac, u8 add);
+void evpn_frr_resync(void);
 int evpn_srv6_imet(u32 evi, ip6_address_t *sid, u8 add);
 int evpn_srv6_mac(u32 evi, mac_address_t *mac, ip6_address_t *sid, u8 add);
 

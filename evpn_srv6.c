@@ -289,7 +289,11 @@ evpn_srv6_service_add (u32 evi, u32 bd_id, ip6_address_t *source,
   if (service_find (evi) != ~0)
     return VNET_API_ERROR_VALUE_EXIST;
   uword *bd = hash_get (bd_main.bd_index_by_bd_id, bd_id);
-  if (!bd || !memcmp (u, m, 16) || ip6_address_is_zero (source)
+  uword *ei = hash_get (evpn_main.evi_by_id, evi);
+  if (!ei || !bd
+      || pool_elt_at_index (evpn_main.evis, ei[0])->bd_index != bd[0]
+      || pool_elt_at_index (evpn_main.evis, ei[0])->irb || !memcmp (u, m, 16)
+      || ip6_address_is_zero (source)
       || ip6_address_is_zero (u) || ip6_address_is_zero (m)
       || ip6_address_is_multicast (source) || ip6_address_is_multicast (u)
       || ip6_address_is_multicast (m))
@@ -324,6 +328,7 @@ evpn_srv6_service_add (u32 evi, u32 bd_id, ip6_address_t *source,
     }
   sid_route (s, index, 0, 1);
   sid_route (s, index, 1, 1);
+  evpn_frr_resync ();
   return 0;
 }
 int
@@ -342,6 +347,7 @@ evpn_srv6_service_del (u32 evi)
   port_del (s->rx[0]);
   port_del (s->rx[1]);
   pool_put (services, s);
+  evpn_frr_resync ();
   return 0;
 }
 int
@@ -416,9 +422,15 @@ evpn_srv6_mac (u32 evi, mac_address_t *mac, ip6_address_t *sid, u8 add)
     }
   return 0;
 }
-/* Reset remote state on agent startup/disconnect. Local endpoints remain. */
-static int
-srv6_flush (u32 evi)
+int
+evpn_srv6_service_exists (u32 evi)
+{
+  return service_find (evi) != ~0;
+}
+
+/* Reset remote state on control disconnect. Local endpoints remain. */
+int
+evpn_srv6_flush (u32 evi)
 {
   u32 si = service_find (evi), *indices = 0, pi;
   if (si == ~0)
@@ -493,7 +505,7 @@ srv6_command (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
                               : evpn_srv6_service_del (evi))
            : kind == 2 ? evpn_srv6_imet (evi, &sid, add)
            : kind == 3 ? evpn_srv6_mac (evi, &mac, &sid, add)
-                       : srv6_flush (evi);
+                       : evpn_srv6_flush (evi);
   return rv ? clib_error_return (0, "evpn srv6 failed: %d", rv) : 0;
 }
 VLIB_CLI_COMMAND (evpn_srv6_command, static)

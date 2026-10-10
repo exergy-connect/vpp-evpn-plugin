@@ -2,7 +2,7 @@
  * Copyright (c) 2026
  * Licensed under the Apache License, Version 2.0 (the "License");
  *
- * Plugin registration — no graph nodes; EVPN agent only.
+ * Plugin registration — EVPN dataplane and native FRR control integration.
  */
 #include <vnet/vnet.h>
 #include <vnet/plugin/plugin.h>

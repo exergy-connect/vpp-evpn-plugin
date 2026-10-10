@@ -1,8 +1,8 @@
 # Native SRv6 bridged EVPN
 
 FRR is the BGP speaker. The existing EVPN plugin provides the Ethernet
-MAC-VRF dataplane; `frr_srv6.py` connects its local MAC events to FRR and
-installs FRR's selected remote routes in VPP.
+MAC-VRF dataplane. Its native `evpn_frr.c` control client connects directly
+to `bgpd`: no intermediary daemon, subprocesses, or CLI commands.
 
 The matching FRR changes are on `feature/srv6-evpn-bridging`. Build both
 working trees against the lab's VPP base image:
@@ -50,33 +50,43 @@ it is not sent as a VXLAN identifier. IPv6 encapsulation uses Next Header
 accepts an ultimate-segment SRH. The core needs routes to the locators and
 an MTU sufficient for the original Ethernet frame plus 40 bytes of IPv6.
 
-Agent configuration:
+Enable the native control connection after provisioning the service:
 
-```json
-{"asn": 65000, "services": [{"evi": 100, "vni": 10100}]}
+```text
+evpn frr enable
+show evpn frr
 ```
 
-Run the agent in the same network namespace as FRR:
+When FRR runs in a different network namespace, explicitly select it:
 
-```sh
-ip netns exec dataplane python3 /usr/local/lib/evpn/frr_srv6.py \
-  --config /etc/vpp/config/evpn-srv6.json
+```text
+evpn frr enable netns /run/netns/dataplane
 ```
+
+`evpn frr disable` disconnects and clears remote forwarding entries. It
+also causes FRR to withdraw local MAC advertisements owned by the connection.
+Local learning remains enabled for other plugin users.
 
 All steady-state updates are event driven:
 
-- VPP's existing binary API emits local MAC add/delete events. On subscription,
-  the plugin replays current learned MACs, including after an agent restart.
-  FRR requests a fresh replay when local service configuration is reapplied.
+- The existing in-process VPP MAC event publisher directly calls the native
+  FRR client. Add/delete messages invoke FRR's EVPN local route functions;
+  no binary API client or `vtysh` process is involved.
 - FRR pushes an ordered snapshot followed by selected Type 2/3 updates and
-  withdrawals on the abstract Unix socket `@frr-evpn-srv6`. The socket is local
-  to the network namespace; FRR accepts only root or its own UID using peer
-  credentials. The normal FRR AppArmor network rule permits it.
-- The adapter blocks on an event queue. It runs no periodic RIB queries.
-  Disconnects flush remote forwarding entries; reconnects obtain a new
-  snapshot. Exponential backoff applies only to failed transport connections.
-- SID changes replace remote MAC ports. Flood destinations are reference-counted
-  by their IMET routes, so one withdrawal cannot remove another route's SID.
+  withdrawals over the abstract Unix socket `@frr-evpn-srv6`. Both endpoints
+  use the versioned fixed-size binary protocol in `evpn_srv6_wire.h` (FRR's
+  matching copy is `bgpd/bgp_evpn_srv6_wire.h`). Network-order fields and
+  bounded queues handle partial reads/writes and reject incompatible peers.
+  The socket is local to the network namespace; FRR accepts only root or its
+  own UID using peer credentials.
+- VPP's socket readiness callbacks wake a VLIB process, which calls the native
+  dataplane functions directly. It waits for events without a connected-state
+  timer. Transport failures alone use a reconnect backoff. Disconnect clears
+  remote entries; reconnect gets a fresh snapshot and replays local FDB MACs.
+- FRR requests MAC replay after local-service reconfiguration. VPP service
+  changes trigger a fresh connection snapshot.
+- SID changes replace remote MAC ports. IMET destinations are retained until
+  the last selected route referencing their SID is withdrawn.
 
 `show evpn srv6` shows endpoint, remote-port, and packet counters.
 `evpn srv6 flush evi 100` clears remote state while retaining local endpoints.
@@ -85,27 +95,20 @@ and multicast frames are dropped; DT2M floods local attachment circuits.
 Both endpoints prevent forwarding received core frames back into the core.
 
 Current scope: full SIDs, one single-homed bridge service in the lab, default
-IPv6 FIB, and one agent per bgpd. SID transposition, IRB, multihoming/ESI
+IPv6 FIB, and one plugin connection per bgpd. SID transposition, IRB, multihoming/ESI
 filtering, ECMP, and host mobility into an existing static remote MAC entry
 are not implemented. The L2/L3 service attributes currently share FRR's
 service storage with a TLV-type discriminator; combined L2/L3 service TLVs on one route are outside
 this implementation's scope.
 
-Validation:
+Validation uses the compiled FRR and VPP binaries in the running lab:
+local learning and deletion, remote withdrawal/recovery, control reconnect,
+SID replacement, split horizon, and full-size host traffic. Existing endpoint
+packet checks are in `test/srv6_packets.py`; Python is used only to inject test
+packets, never as part of the control plane.
 
-```sh
-python3 test/test_frr_srv6.py
-```
-
-`test/srv6_packets.py` runs on the privileged Docker host against the deployed
-lab. Supply the PE/HA container PIDs and the core/local/remote MAC addresses;
-it tests known/unknown unicast, BUM, split horizon, SRH validation, IPv6 length
-checks, and Ethernet-II validation without changing host addresses.
-
-Validated in `srv6-evpn`: HA↔HB ping, including 1500-byte IP packets;
-EVPN session withdrawal/recovery; adapter restart snapshots; advertised
-unicast SID replacement; and local-service removal/reconfiguration with
-MAC replay. Core capture shows IPv6 Next Header 143 and a 1514-byte Ethernet
-payload for the full-size ping. An idle adapter trace recorded no CLI
-executions. Focused checks passed: 23 FRR attribute-parser cases, six adapter
-unit tests, three lab-template tests, and ten endpoint packet cases.
+The native transport test in `test/srv6_control.c` checks snapshot framing,
+fragmented/coalesced MAC updates, and incompatible-version disconnects against
+a running bgpd. Compile and run it as described in its file header, with the
+VPP control client temporarily disabled. Verify the two test MACs appear and
+withdraw on the peer between the test's Enter prompts, then re-enable VPP.

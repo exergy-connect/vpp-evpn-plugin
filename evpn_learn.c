@@ -119,6 +119,7 @@ evpn_publish_mac_learn (u32 evi, mac_address_t * mac, u32 sw_if_index,
       hash_unset (em->learned_mac_seen, key);
     }
 
+  evpn_frr_mac (evi, mac, is_add);
   evpn_send_mac_learn_event (evi, mac, sw_if_index, is_add);
   EVPN_DBG ("learn mac %s evi %u mac %U sw_if %u", is_add ? "add" : "del",
 	    evi, format_mac_address_t, mac, sw_if_index);
@@ -1540,8 +1541,12 @@ evpn_learn_reconcile (void)
 void
 evpn_learn_replay (void)
 {
+  evpn_evi_t *e;
+  if (!evpn_main.learn_enabled)
+    return;
   replay_mac_events = 1;
-  evpn_learn_reconcile ();
+  pool_foreach (e, evpn_main.evis)
+    evpn_learn_scan_evi (e);
   replay_mac_events = 0;
 }
 

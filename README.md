@@ -258,3 +258,9 @@ python3 test/anycast.py CONTAINER        # gateway MAC/IP stay local
 ```
 
 Expected smoke wiring: [`test/README.md`](test/README.md).
+
+## Native SRv6 bridged EVPN
+
+The plugin connects directly to patched FRR in native C, using local MAC
+events and selected EVPN route notifications. Provisioning and build
+instructions are in [SRV6.md](SRV6.md).

@@ -866,6 +866,8 @@ evpn_evi_del (u32 evi)
   evpn_imet_t *i;
   if (!p)
     return VNET_API_ERROR_NO_SUCH_ENTRY;
+  if (evpn_srv6_service_exists (evi))
+    return VNET_API_ERROR_INSTANCE_IN_USE;
   /* Require withdrawals first; never leave children with stale references. */
   pool_foreach (m, em->macs)
     if (m->evi == evi)

@@ -22,5 +22,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /runtime/ /
 COPY --from=build /build/plugin/evpn_plugin.so /usr/lib/x86_64-linux-gnu/vpp_plugins/
 COPY --from=build /build/plugin/evpn/evpn.api.json /usr/share/vpp/api/plugins/
-COPY --from=build /src/plugin/agent/frr_srv6.py /usr/local/lib/evpn/
 RUN ldconfig
