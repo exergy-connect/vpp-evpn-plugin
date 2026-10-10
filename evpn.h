@@ -258,6 +258,7 @@ int evpn_prefix_del (u32 table_id, fib_prefix_t * pfx);
 
 int evpn_learn_enable (u8 enable);
 void evpn_learn_sync (void);
+void evpn_learn_replay (void);
 void evpn_ensure_pools (void);
 
 /* Anycast / SVI gateway protection (inferred; no dedicated CLI). */
@@ -297,5 +298,12 @@ void evpn_send_mac_learn_event (u32 evi, mac_address_t * mac, u32 sw_if_index,
 				u8 is_add);
 void evpn_send_prefix_learn_event (u32 table_id, fib_prefix_t * pfx,
 				   mac_address_t * router_mac, u8 is_add);
+
+/* Native SRv6 bridged Ethernet service (End.DT2U / End.DT2M). */
+int evpn_srv6_service_add(u32 evi, u32 bd_id, ip6_address_t *source,
+                         ip6_address_t *unicast, ip6_address_t *multicast);
+int evpn_srv6_service_del(u32 evi);
+int evpn_srv6_imet(u32 evi, ip6_address_t *sid, u8 add);
+int evpn_srv6_mac(u32 evi, mac_address_t *mac, ip6_address_t *sid, u8 add);
 
 #endif /* included_evpn_h */

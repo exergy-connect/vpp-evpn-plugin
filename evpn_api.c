@@ -259,6 +259,8 @@ vl_api_want_evpn_learn_events_t_handler (vl_api_want_evpn_learn_events_t * mp)
 
 done:
   REPLY_MACRO (VL_API_WANT_EVPN_LEARN_EVENTS_REPLY);
+  if (mp->enable_disable)
+    evpn_learn_replay ();
 }
 
 #include <evpn/evpn.api.c>

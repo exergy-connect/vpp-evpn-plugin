@@ -88,6 +88,7 @@ enum
 /* Forward decls */
 extern vlib_node_registration_t evpn_learn_process_node;
 static void evpn_learn_reconcile (void);
+static u8 replay_mac_events;
 
 static u64
 evpn_learn_mac_key (u32 evi, const u8 * mac)
@@ -107,7 +108,7 @@ evpn_publish_mac_learn (u32 evi, mac_address_t * mac, u32 sw_if_index,
 
   if (is_add)
     {
-      if (hash_get (em->learned_mac_seen, key))
+      if (!replay_mac_events && hash_get (em->learned_mac_seen, key))
 	return;
       hash_set (em->learned_mac_seen, key, 1);
     }
@@ -1534,6 +1535,14 @@ evpn_learn_reconcile (void)
   }
   evpn_gw_refresh_all ();
   evpn_learn_scan_kernel_routes ();
+}
+
+void
+evpn_learn_replay (void)
+{
+  replay_mac_events = 1;
+  evpn_learn_reconcile ();
+  replay_mac_events = 0;
 }
 
 void

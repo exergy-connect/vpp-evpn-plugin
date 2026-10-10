@@ -19,3 +19,9 @@
 #
 # IPv6 (test/ipv6.py):
 #   IPv6 Type-5 and ipv4-nh-mode ipv6 / auto-on-IPv6-only-BVI use fd00:a9fe:: NH.
+#
+# Native SRv6 bridged EVPN:
+#   python3 test/test_frr_srv6.py — event-stream adapter unit tests.
+#   test/srv6_packets.py — endpoint packet checks against the running lab;
+#     run on its privileged Docker host with PE/HA PIDs and host/core MACs.
+#   See agent/README.md for provisioning, build, and current scope.

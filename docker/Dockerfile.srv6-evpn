@@ -1,0 +1,26 @@
+# Build against the exact VPP headers and libraries used by the runtime.
+ARG VPP_BASE=xform/vpp:linux-cp-srv6-route-sync
+FROM ${VPP_BASE} AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake python3-ply autoconf automake libtool pkg-config \
+    bison flex libjson-c-dev libc-ares-dev libpcre2-dev libreadline-dev \
+    libyang-dev python3-dev libcap-dev libelf-dev protobuf-c-compiler libprotobuf-c-dev
+COPY frr /src/frr
+WORKDIR /src/frr
+RUN ./bootstrap.sh && ./configure --prefix=/usr --sysconfdir=/etc \
+    --localstatedir=/var --sbindir=/usr/lib/frr --libdir=/usr/lib/x86_64-linux-gnu \
+    --enable-user=frr --enable-group=frr --enable-vty-group=frrvty --enable-vtysh \
+    --enable-multipath=64 --disable-doc --disable-ospfd --disable-ospf6d \
+    --disable-ripd --disable-ripngd --disable-babeld --disable-pimd --disable-pim6d \
+    --disable-ldpd --disable-nhrpd --disable-eigrpd --disable-bfdd --disable-pathd \
+    --disable-pbrd --disable-vrrpd && make -j4 && make DESTDIR=/runtime install
+COPY plugin /src/plugin
+RUN cmake -S /src/plugin -B /build/plugin && cmake --build /build/plugin -j4
+FROM ${VPP_BASE}
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libyang3 libprotobuf-c1 libcap2 libelf1 && rm -rf /var/lib/apt/lists/*
+COPY --from=build /runtime/ /
+COPY --from=build /build/plugin/evpn_plugin.so /usr/lib/x86_64-linux-gnu/vpp_plugins/
+COPY --from=build /build/plugin/evpn/evpn.api.json /usr/share/vpp/api/plugins/
+COPY --from=build /src/plugin/agent/frr_srv6.py /usr/local/lib/evpn/
+RUN ldconfig

@@ -82,6 +82,7 @@ if(VPP_EXTERNAL_PROJECT)
         evpn_cli.c
         evpn_api.c
         evpn_learn.c
+      evpn_srv6.c
         evpn.h
       API_FILES
         evpn.api
@@ -133,6 +134,7 @@ if(VPP_EXTERNAL_PROJECT)
       evpn_cli.c
       evpn_api.c
       evpn_learn.c
+      evpn_srv6.c
       ${API_GEN_SRCS})
     set_target_properties(evpn_plugin PROPERTIES
       PREFIX ""
@@ -158,6 +160,7 @@ else()
       evpn_cli.c
       evpn_api.c
       evpn_learn.c
+      evpn_srv6.c
       evpn.h
 
     API_FILES
