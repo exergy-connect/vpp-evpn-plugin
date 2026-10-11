@@ -97,9 +97,9 @@ Remote MAC ports never participate in flooding. DT2U unknown destinations
 and multicast frames are dropped; DT2M floods local attachment circuits.
 Both endpoints prevent forwarding received core frames back into the core.
 
-Current scope: full SIDs, one single-homed bridge service in the lab, default
-IPv6 FIB, and one plugin connection per bgpd. SID transposition, IRB, multihoming/ESI
-filtering, ECMP, and host mobility into an existing static remote MAC entry
+Current scope: full SIDs, local ES/EVI and MAC ownership signaling, default
+IPv6 FIB, and one plugin connection per bgpd. SID transposition, IRB, DF enforcement,
+same-ES filtering, aliasing/ECMP, and host mobility into an existing static remote MAC entry
 are not implemented. The L2/L3 service attributes currently share FRR's
 service storage with a TLV-type discriminator; combined L2/L3 service TLVs on one route are outside
 this implementation's scope.
@@ -115,3 +115,44 @@ fragmented/coalesced MAC updates, and incompatible-version disconnects against
 a running bgpd. Compile and run it as described in its file header, with the
 VPP control client temporarily disabled. Verify the two test MACs appear and
 withdraw on the peer between the test's Enter prompts, then re-enable VPP.
+
+## Local Ethernet Segment ownership
+
+For a native service, register each bond/EVI attachment before enabling FRR:
+
+```
+evpn es add evi 100 interface BondEthernet1 esi 00:01:00:00:00:00:00:00:00:01 source 2001:db8::2 df-pref 10
+evpn frr enable netns /run/netns/dataplane
+show evpn es
+```
+
+Use the same ESI on both PEs, with each PE's own source address. Bond admin
+and hardware link callbacks send operational changes without polling. VPP
+sends ES/EVI registration before learned MAC replay. MAC moves retain their
+attachment interface and ESI; late deletes from the former interface are ignored.
+FRR originates Type-4 and Type-1 routes through its existing multihoming code,
+and Type-2 routes with the owning ESI. ES-down withdraws attached local MACs;
+control disconnect withdraws all client-owned MACs and ES/EVI associations.
+ES removal uses `evpn es del evi 100 interface BondEthernet1`; remaining learned
+MACs are replayed as single-homed. Trunk subinterfaces inherit their bond's ESI.
+
+This uses version 2 of the 64-byte control protocol, so update FRR and VPP
+together. xForm provisions the VPP ES directly for native SRv6 and omits the
+Linux shadow ES configuration. The runtime packet regression is
+`python3 test/srv6_mh_vpp.py` in a disposable privileged VPP container.
+The FRR transport regression is `python3 test/srv6_mh_frr.py` in a disposable
+container with the matching bgpd and vtysh installed.
+
+The SRv6 per-ES A-D route carries a zero End.DT2M SID for local bias
+([RFC 9252 section 6.1.1](https://www.rfc-editor.org/rfc/rfc9252.html#section-6.1.1)).
+FRR tracks that route's PE next hop instead of attempting to resolve `::`.
+Per-EVI A-D and MAC routes continue to track their nonzero service SIDs.
+FRR's default retains per-EVI A-D on a down ES; per-ES A-D, Type-4 and
+client-owned MAC reachability are withdrawn.
+
+`python3 test/srv6_mh_lab.py --failover` validates received Type-1/4 paths,
+including zero-SID reachability, MAC ESI ownership and pings through either
+surviving attachment in `labs/srv6/evpn-mh.xp`. It briefly disables each
+PE access member and restores it even when a check fails. With both members
+up, duplicate BUM traffic remains possible until DF enforcement and same-ES
+filtering are implemented.

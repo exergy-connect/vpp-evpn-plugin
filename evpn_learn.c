@@ -108,18 +108,20 @@ evpn_publish_mac_learn (u32 evi, mac_address_t * mac, u32 sw_if_index,
 
   if (is_add)
     {
-      if (!replay_mac_events && hash_get (em->learned_mac_seen, key))
+      if (!replay_mac_events && hash_get (em->learned_mac_seen, key)
+          && hash_get (em->learned_mac_seen, key)[0] == sw_if_index + 1)
 	return;
-      hash_set (em->learned_mac_seen, key, 1);
+      hash_set (em->learned_mac_seen, key, sw_if_index + 1);
     }
   else
     {
-      if (!hash_get (em->learned_mac_seen, key))
+      if (!hash_get (em->learned_mac_seen, key)
+          || hash_get (em->learned_mac_seen, key)[0] != sw_if_index + 1)
 	return;
       hash_unset (em->learned_mac_seen, key);
     }
 
-  evpn_frr_mac (evi, mac, is_add);
+  evpn_frr_mac (evi, mac, sw_if_index, is_add);
   evpn_send_mac_learn_event (evi, mac, sw_if_index, is_add);
   EVPN_DBG ("learn mac %s evi %u mac %U sw_if %u", is_add ? "add" : "del",
 	    evi, format_mac_address_t, mac, sw_if_index);
@@ -164,7 +166,8 @@ evpn_sw_is_vxlan (u32 sw_if_index)
     vnet_get_sup_hw_interface (evpn_main.vnet_main, sw_if_index);
   if (!hi || !hi->name)
     return 0;
-  return (strncmp ((char *) hi->name, "vxlan", 5) == 0);
+  return (strncmp ((char *) hi->name, "vxlan", 5) == 0
+          || strncmp ((char *) hi->name, "evpn-srv6", 9) == 0);
 }
 
 static int

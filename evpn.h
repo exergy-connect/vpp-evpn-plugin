@@ -305,7 +305,7 @@ int evpn_srv6_service_add(u32 evi, u32 bd_id, ip6_address_t *source,
 int evpn_srv6_service_del(u32 evi);
 int evpn_srv6_service_exists(u32 evi);
 int evpn_srv6_flush(u32 evi);
-void evpn_frr_mac(u32 evi, mac_address_t *mac, u8 add);
+void evpn_frr_mac(u32 evi, mac_address_t *mac, u32 sw_if_index, u8 add);
 void evpn_frr_resync(void);
 int evpn_srv6_imet(u32 evi, ip6_address_t *sid, u8 add);
 int evpn_srv6_mac(u32 evi, mac_address_t *mac, ip6_address_t *sid, u8 add);

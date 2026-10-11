@@ -25,3 +25,11 @@
 #   test/srv6_packets.py — endpoint packet checks against the running lab;
 #     run on its privileged Docker host with PE/HA PIDs and host/core MACs.
 #   See SRV6.md for provisioning, build, and current scope.
+
+# Local SRv6 Ethernet Segment ownership:
+#   srv6_mh_vpp.py — actual Ethernet learning and VPP socket messages, ES
+#     down/up, reconnect ordering and bond removal in a disposable container.
+#   srv6_mh_frr.py — compiled bgpd Type-1/2/4 origination, ESI/SRv6
+#     attributes, stale deletes, ES-down and disconnect cleanup.
+#   srv6_mh_lab.py --failover — received zero-SID A-D validity and live
+#     attachment failover/pings; run on the lab Docker host.
