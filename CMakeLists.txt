@@ -82,6 +82,7 @@ if(VPP_EXTERNAL_PROJECT)
         evpn_cli.c
         evpn_api.c
         evpn_learn.c
+        evpn_lacp.c
         evpn_srv6.c
         evpn_frr.c
         evpn.h
@@ -135,6 +136,7 @@ if(VPP_EXTERNAL_PROJECT)
       evpn_cli.c
       evpn_api.c
       evpn_learn.c
+      evpn_lacp.c
       evpn_srv6.c
       evpn_frr.c
       ${API_GEN_SRCS})
@@ -162,6 +164,7 @@ else()
       evpn_cli.c
       evpn_api.c
       evpn_learn.c
+      evpn_lacp.c
       evpn_srv6.c
       evpn_frr.c
       evpn.h
