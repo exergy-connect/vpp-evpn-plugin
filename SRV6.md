@@ -42,12 +42,15 @@ router bgp 65000
  exit-address-family
 ```
 
-The remote SID is learned from EVPN, never configured in the lab. Type 2
-carries a full End.DT2U SID; Type 3 carries an End.DT2M SID, using the L2
-Service TLV in the BGP Prefix-SID attribute. VNI identifies the MAC-VRF;
-it is not sent as a VXLAN identifier. IPv6 encapsulation uses Next Header
-143 directly, with no SRH needed for a single segment. Decapsulation also
-accepts an ultimate-segment SRH. The core needs routes to the locators and
+The remote SID is learned from EVPN, never configured in the lab. Applicable
+standards are summarized in the [README](README.md#native-srv6-bridged-evpn):
+RFC 7432 Type-2 and Type-3, RFC 8986 End.DT2U / End.DT2M with IPv6 next
+header 143 (raw Ethernet), and RFC 9252's BGP Prefix-SID L2 Service TLV.
+Type 2 carries a full End.DT2U SID; Type 3 carries an End.DT2M SID. VNI
+identifies the MAC-VRF; it is not sent as a VXLAN identifier. A single
+segment is an IPv6 header whose destination is the service SID and whose
+next header is 143. Decapsulation also accepts an ultimate-segment SRH
+(next header 43, routing type 4). The core needs routes to the locators and
 an MTU sufficient for the original Ethernet frame plus 40 bytes of IPv6.
 
 Enable the native control connection after provisioning the service:

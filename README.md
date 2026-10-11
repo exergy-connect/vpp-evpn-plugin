@@ -264,3 +264,13 @@ Expected smoke wiring: [`test/README.md`](test/README.md).
 The plugin connects directly to patched FRR in native C, using local MAC
 events and selected EVPN route notifications. Provisioning and build
 instructions are in [SRV6.md](SRV6.md).
+
+Bridged EVPN over SRv6 follows these specifications:
+
+| Spec | Role in this dataplane |
+| --- | --- |
+| [RFC 7432](https://www.rfc-editor.org/rfc/rfc7432) | EVPN Type-2 (MAC/IP) and Type-3 (inclusive multicast) |
+| [RFC 8986](https://www.rfc-editor.org/rfc/rfc8986) | End.DT2U (known unicast MAC) and End.DT2M (BUM). IPv6 next header **143** means the following bytes are the original Ethernet frame |
+| [RFC 9252](https://www.rfc-editor.org/rfc/rfc9252) | BGP Prefix-SID L2 Service TLV. Type-2 carries the full End.DT2U SID; Type-3 carries the End.DT2M SID |
+
+The VNI identifies the MAC-VRF. It is not a VXLAN tunnel identifier. When the service SID is the only segment, the packet is an IPv6 header whose destination is that SID and whose next header is 143. Decapsulation also accepts an SRv6 routing header (next header 43, routing type 4) when the service SID is the ultimate segment. The core routes the locator; the MTU must fit the Ethernet frame plus 40 bytes of IPv6, and more when an SRH is present. SID arguments, transposition, and ESI filtering are outside the current implementation.
