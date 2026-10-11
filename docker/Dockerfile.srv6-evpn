@@ -15,7 +15,7 @@ RUN ./bootstrap.sh && ./configure --prefix=/usr --sysconfdir=/etc \
     --disable-ldpd --disable-nhrpd --disable-eigrpd --disable-bfdd --disable-pathd \
     --disable-pbrd --disable-vrrpd && make -j4 && make DESTDIR=/runtime install
 COPY plugin /src/plugin
-RUN cmp /src/frr/bgpd/bgp_evpn_srv6_wire.h /src/plugin/evpn_srv6_wire.h \
+RUN cmp /src/frr/zebra/zebra_evpn_srv6_wire.h /src/plugin/evpn_srv6_wire.h \
     && cmake -S /src/plugin -B /build/plugin -DVPP_EXTERNAL_PROJECT=ON \
        -DVPP_INSTALL_PATH=/usr -DCMAKE_INSTALL_PREFIX=/usr \
     && cmake --build /build/plugin -j4 \

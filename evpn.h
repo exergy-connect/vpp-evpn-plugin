@@ -305,9 +305,19 @@ int evpn_srv6_service_add(u32 evi, u32 bd_id, ip6_address_t *source,
 int evpn_srv6_service_del(u32 evi);
 int evpn_srv6_service_exists(u32 evi);
 int evpn_srv6_flush(u32 evi);
-void evpn_frr_mac(u32 evi, mac_address_t *mac, u32 sw_if_index, u8 add);
-void evpn_frr_resync(void);
+void evpn_zebra_mac (u32 evi, mac_address_t *mac, u32 sw_if_index, u8 add);
+void evpn_zebra_resync (void);
 int evpn_srv6_imet(u32 evi, ip6_address_t *sid, u8 add);
 int evpn_srv6_mac(u32 evi, mac_address_t *mac, ip6_address_t *sid, u8 add);
+
+int evpn_srv6_mac_local (u32 evi, mac_address_t *mac, ip6_address_t *sid, u32 sw_if_index);
+u8 evpn_srv6_bum_origin (vlib_buffer_t *b, ip6_address_t *origin);
+
+/* Zebra dataplane programming; callers hold the VPP worker barrier. */
+int evpn_srv6_nh_update (u32 id, ip6_address_t *peer, u8 group, u8 add, u8 flags, u32 member);
+int evpn_srv6_peer_sid (u32 evi, ip6_address_t *peer, ip6_address_t *sid, u8 type);
+int evpn_srv6_vtep (u32 evi, ip6_address_t *peer, ip6_address_t *sid, u8 add);
+int evpn_srv6_mac_nhg (u32 evi, mac_address_t *mac, u32 id);
+void evpn_srv6_control_reset (void);
 
 #endif /* included_evpn_h */

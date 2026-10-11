@@ -50,7 +50,7 @@ def per_es(path):
 def ping_both():
     for host, destination in [('ha', '172.16.100.6'), ('hb', '172.16.100.5')]:
         result = run(host, 'ping', '-c', '3', '-W', '2', destination)
-        assert '0% packet loss' in result, result
+        assert '0% packet loss' in result and 'DUP!' not in result, result
         print(result, end='', flush=True)
 
 
@@ -58,6 +58,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--failover', action='store_true')
     args = parser.parse_args()
+    wait_for(lambda: all('control ready' in run(n, 'vppctl', 'show', 'evpn', 'zebra')
+                         for n in ['pe1', 'pe2', 'pe3']))
+    wait_for(lambda: 'DF yes peers 1' in run('pe2', 'vppctl', 'show', 'evpn', 'es')
+                     and 'DF no peers 1' in run('pe1', 'vppctl', 'show', 'evpn', 'es'))
     for peer in ['2001:db8::2', '2001:db8::3']:
         eads = [p for p in paths('ead') if p.get('peerId') == peer]
         assert len(eads) == 2 and all(p.get('valid') for p in eads), eads
@@ -73,17 +77,25 @@ def main():
                 def withdrawn():
                     return ('down' in run(node, 'vppctl', 'show', 'evpn', 'es')
                             and not any(p.get('peerId') == peer
-                                        for kind in ['es', 'macip'] for p in paths(kind))
+                                        for kind in ['es'] for p in paths(kind))
                             and not any(p.get('peerId') == peer and per_es(p) for p in paths('ead')))
                 wait_for(withdrawn)
+                survivor = 'pe2' if node == 'pe1' else 'pe1'
+                wait_for(lambda: 'DF yes peers 0' in run(survivor, 'vppctl', 'show', 'evpn', 'es'))
                 # FRR's default retains per-EVI A-D routes while withdrawing
-                # per-ES reachability, ES routes, and locally owned MACs.
+                # per-ES reachability and ES routes. Native MAC synchronization
+                # may retain proxy Type-2 advertisements for surviving peers.
+                # Validate the forwarding membership as well as withdrawal.
+                nexthops = run('pe3', 'vtysh', '-c', 'show evpn es ' + ESI)
+                assert peer not in nexthops, nexthops
                 ping_both()
                 print('PASS:', node, 'attachment-down route withdrawals and pings', flush=True)
             finally:
                 run(node, 'vppctl', 'set', 'interface', 'state', 'host-eth2', 'up')
                 wait_for(lambda: any(p.get('peerId') == peer and per_es(p) and p.get('valid')
                                      for p in paths('ead')))
+                wait_for(lambda: 'DF yes peers 1' in run('pe2', 'vppctl', 'show', 'evpn', 'es')
+                                 and 'DF no peers 1' in run('pe1', 'vppctl', 'show', 'evpn', 'es'))
                 print('Recovered', node, flush=True)
 
 

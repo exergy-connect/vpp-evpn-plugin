@@ -121,7 +121,7 @@ evpn_publish_mac_learn (u32 evi, mac_address_t * mac, u32 sw_if_index,
       hash_unset (em->learned_mac_seen, key);
     }
 
-  evpn_frr_mac (evi, mac, sw_if_index, is_add);
+  evpn_zebra_mac (evi, mac, sw_if_index, is_add);
   evpn_send_mac_learn_event (evi, mac, sw_if_index, is_add);
   EVPN_DBG ("learn mac %s evi %u mac %U sw_if %u", is_add ? "add" : "del",
 	    evi, format_mac_address_t, mac, sw_if_index);
