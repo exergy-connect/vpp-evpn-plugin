@@ -7,6 +7,7 @@
 #include <vnet/dpo/dpo.h>
 #include <vnet/ip/ip6_packet.h>
 #include <vnet/l2/l2_output.h>
+#include <vnet/srv6/sr.h>
 
 /* EVPN route types and Zebra NHG update flags retain their wire values. */
 enum
@@ -403,6 +404,28 @@ port_find (u32 si, const ip6_address_t *sid, u8 multicast)
   return ~0;
 }
 
+/* Service /128 DPOs bypass the covering native LocalSID behaviors. Account
+ * their input against every containing LocalSID prefix in the same table.
+ * Use native counters so clear sr localsid counters also clears aggregates.
+ * Resolve live objects rather than retaining indices across SID deletion. */
+static void
+srv6_count_locators (vlib_main_t *vm, u32 fib_index, const ip6_address_t *dst,
+                     u32 bytes, u8 good)
+{
+  ip6_sr_localsid_t *ls;
+  pool_foreach (ls, sr_main.localsids)
+    {
+      ip6_address_t mask;
+      if (ls->fib_table != fib_table_get_table_id (fib_index, FIB_PROTOCOL_IP6))
+        continue;
+      ip6_address_mask_from_width (&mask, ls->localsid_prefix_len);
+      if (ip6_address_is_equal_masked (dst, &ls->localsid, &mask))
+        vlib_increment_combined_counter (
+          good ? &sr_main.sr_ls_valid_counters : &sr_main.sr_ls_invalid_counters,
+          vm->thread_index, ls - sr_main.localsids, 1, bytes);
+    }
+}
+
 VLIB_NODE_FN (evpn_srv6_input_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
@@ -416,6 +439,8 @@ VLIB_NODE_FN (evpn_srv6_input_node)
         {
           evpn_srv6_service_t *s = pool_elt_at_index (services, si);
           ip6_header_t *ip = vlib_buffer_get_current (b);
+          ip6_address_t destination = ip->dst_address;
+          u32 packet_bytes = vlib_buffer_length_in_chain (vm, b);
           u32 offset = sizeof (ip6_header_t), proto = ip->protocol;
           if (proto == IP_PROTOCOL_IPV6_ROUTE &&
               b->current_length >= sizeof (ip6_header_t) + EVPN_SRV6_SRH_UNIT_BYTES)
@@ -457,6 +482,8 @@ VLIB_NODE_FN (evpn_srv6_input_node)
                   next = EVPN_SRV6_INPUT_NEXT_L2;
                 }
             }
+          srv6_count_locators (vm, s->fib_index, &destination, packet_bytes,
+                               next == EVPN_SRV6_INPUT_NEXT_L2);
         }
       vlib_set_next_frame_buffer (vm, node, next, from[i]);
     }

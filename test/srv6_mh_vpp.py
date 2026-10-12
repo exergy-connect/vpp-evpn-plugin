@@ -180,6 +180,31 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
                 assert copies == int(expect_delivery), (name, copies, ctl('show errors'))
                 print('PASS:', name, flush=True)
 
+            # Both containing prefixes aggregate service /128 traffic. An
+            # adjacent /64 must stay untouched, and native clear resets all.
+            for prefix in ['5f00:0:1::/48', '5f00:0:1:100::/64', '5f00:0:1::/64']:
+                ctl(f'sr localsid prefix {prefix} behavior end')
+
+            def locator_counters():
+                result = ctl('show sr localsids')
+                return {
+                    address: tuple(map(int, values))
+                    for address, *values in re.findall(
+                        r'Address:\s*(\S+).*?Good traffic:\s*\[(\d+) packets : (\d+) bytes\]'
+                        r'.*?Bad traffic:\s*\[(\d+) packets : (\d+) bytes\]',
+                        result, re.S)
+                }
+
+            ctl('clear sr localsid counters')
+            inject('locator-valid', False, unicast=True, target=bytes.fromhex('0200fffffffd'))
+            inject('locator-invalid', False, unicast=True, ether_type=100)
+            counts = locator_counters()
+            for prefix in ['5f00:0:1::/48', '5f00:0:1:100::/64']:
+                assert counts[prefix] == (1, 100, 1, 100), counts
+            assert counts['5f00:0:1::/64'] == (0, 0, 0, 0), counts
+            ctl('clear sr localsid counters')
+            assert all(value == (0, 0, 0, 0) for value in locator_counters().values())
+
             alias = bytes.fromhex('020000ff0002')
             def remote_mac(local=True, add=1, address=alias):
                 client.sendall(FRAME.pack(0x45565036, 5, 3, 2, add, 100,

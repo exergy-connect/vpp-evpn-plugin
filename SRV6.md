@@ -162,3 +162,12 @@ python3 test/srv6_mh_lab.py --failover  # native routes, pings, each attachment
 `show errors` exposes non-DF and same-ES drop counters. Zebra's `show evpn es
 detail`, `show evpn mac vni <vni>` and `show evpn next-hops` expose the control
 state that VPP applies.
+
+`show sr localsids` includes EVPN service receive traffic in every containing
+LocalSID prefix in the same IPv6 table, even when a service /128 route bypasses
+that prefix's behavior. Good/bad counters reflect service decapsulation
+validation; byte counts include the outer IPv6 header. Later L2 forwarding or
+split-horizon drops do not change that classification. Native
+`clear sr localsid counters` resets these aggregates. For example,
+`5f00:0:1:100:1::` contributes to `5f00:0:1::/48` and
+`5f00:0:1:100::/64`, but not `5f00:0:1::/64`.
