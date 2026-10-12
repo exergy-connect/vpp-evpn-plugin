@@ -320,4 +320,8 @@ int evpn_srv6_vtep (u32 evi, ip6_address_t *peer, ip6_address_t *sid, u8 add);
 int evpn_srv6_mac_nhg (u32 evi, mac_address_t *mac, u32 id);
 void evpn_srv6_control_reset (void);
 
+int evpn_srv6_local_sid (u32 evi, const ip6_address_t *source,
+                         const ip6_address_t *sid, u8 type, u8 add);
+void evpn_srv6_local_sid_reset (void);
+
 #endif /* included_evpn_h */

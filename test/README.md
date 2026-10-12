@@ -32,3 +32,7 @@
 #     Type-1/2/4 origination, DF election, ES-down and reconnect cleanup.
 #   srv6_mh_lab.py --failover — received zero-SID A-D validity and live
 #     attachment failover/pings; run on the lab Docker host.
+
+# Zebra-owned SRv6 service SIDs (matching protocol v5 binaries):
+#   srv6_sid_lifecycle.py — real bgpd/Zebra/VPP allocation, route activation,
+#     service removal and Zebra restart with ownership replay.

@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
- * Zebra/VPP dataplane SRv6 Ethernet control protocol, version 4.
+ * Zebra/VPP dataplane SRv6 Ethernet control protocol, version 5.
  * Fixed-size frames; integers in network byte order, addresses as wire bytes.
  * Keep the copies in FRR and the VPP EVPN plugin identical.
  * Zebra sends dataplane programming and SRv6 encapsulation metadata.
@@ -11,7 +11,7 @@
 #include <stdint.h>
 #define EVPN_SRV6_SOCKET "zebra-evpn-srv6"
 #define EVPN_SRV6_MAGIC 0x45565036U
-#define EVPN_SRV6_VERSION 4
+#define EVPN_SRV6_VERSION 5
 #define EVPN_SRV6_QUEUE_LIMIT (1024 * 1024)
 enum evpn_srv6_op {
   EVPN_SRV6_BEGIN = 1,
@@ -25,6 +25,7 @@ enum evpn_srv6_op {
   EVPN_SRV6_SID, /* PE originator in key, service SID in sid, type 2/3 */
   EVPN_SRV6_NH, /* Zebra FDB NH id in sw_if_index, PE address in sid */
   EVPN_SRV6_NHG, /* reset=2, member=1 (vni=member id), commit=0 */
+  EVPN_SRV6_LOCAL_SID = 13, /* Zebra-owned local DT2U/DT2M endpoint */
   EVPN_SRV6_ES = 6, /* VPP local ES/EVI association and operational state */
 };
 struct evpn_srv6_msg {

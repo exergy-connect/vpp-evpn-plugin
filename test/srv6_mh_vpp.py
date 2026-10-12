@@ -73,6 +73,8 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
             ctl('set interface l2 bridge BondEthernet1 100')
             ctl('evpn evi add evi 100 vni 100 bd 100')
             ctl('evpn srv6 service add evi 100 bd 100 source 2001:db8::2 unicast 5f00:0:1:100:1:: multicast 5f00:0:1:100:2::')
+            assert 'Zebra pending/pending' in ctl('show evpn srv6')
+            assert '5f00:0:1:100:1::/128' not in ctl('show ip6 fib')
             ctl('evpn es add evi 100 interface BondEthernet1 esi 00:01:00:00:00:00:00:00:00:01 source 2001:db8::2 df-pref 10')
             command('ip', 'link', 'add', 'br100', 'type', 'bridge')
             command('ip', 'link', 'add', 'BondEthernet1', 'type', 'dummy')
@@ -81,7 +83,7 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
             received = bytearray()
 
             def frame(op):
-                return FRAME.pack(0x45565036, 4, op, 0, 0, 0, bytes(16), bytes(16),
+                return FRAME.pack(0x45565036, 5, op, 0, 0, 0, bytes(16), bytes(16),
                                   0, bytes(10), 0, 0, bytes(3))
 
             def connect():
@@ -90,6 +92,11 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
                 client.settimeout(10)
                 received.clear()
                 client.sendall(frame(1) + frame(2))  # BEGIN / END
+                for kind in [2, 3]:
+                    client.sendall(FRAME.pack(0x45565036, 5, 13, kind, 1, 100,
+                                   socket.inet_pton(socket.AF_INET6, '2001:db8::2'),
+                                   socket.inet_pton(socket.AF_INET6, f'5f00:0:1:100:{kind-1}::'),
+                                   0, bytes(10), 0, 0, bytes(3)))
 
             def expect(op, add, key=None, flags=None, esi=ESI):
                 until = time.monotonic() + 10
@@ -103,7 +110,7 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
                     while len(received) >= FRAME.size:
                         fields = FRAME.unpack(received[:FRAME.size])
                         del received[:FRAME.size]
-                        assert fields[:2] == (0x45565036, 4), fields
+                        assert fields[:2] == (0x45565036, 5), fields
                         if fields[2] != op or fields[4] != add:
                             continue
                         if key is not None and fields[6][:6] != key:
@@ -144,7 +151,7 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
             sender.bind(('mh-wire', 0))
 
             def control(op, flags=0, peer='2001:db8::3'):
-                client.sendall(FRAME.pack(0x45565036, 4, op, 4, 1, 0, bytes(16),
+                client.sendall(FRAME.pack(0x45565036, 5, op, 4, 1, 0, bytes(16),
                                socket.inet_pton(socket.AF_INET6, peer), es[8], bytes(10),
                                0, flags, bytes(3)))
 
@@ -175,7 +182,7 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
 
             alias = bytes.fromhex('020000ff0002')
             def remote_mac(local=True, add=1, address=alias):
-                client.sendall(FRAME.pack(0x45565036, 4, 3, 2, add, 100,
+                client.sendall(FRAME.pack(0x45565036, 5, 3, 2, add, 100,
                                address + bytes(10), socket.inet_pton(socket.AF_INET6, '5f00:0:2:100:1::'),
                                linux_bond if local else 0, bytes(10), 0, 1 if local else 0, bytes(3)))
             remote_mac(True)
@@ -205,7 +212,7 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
             access.bind(('mh-host', 0))
             ctl('set ip neighbor host-mh-core 2001:db8:ffff::1 ' + sender.getsockname()[4].hex(':'))
             def program(op, identity=0, member=0, flags=0, peer='2001:db8::3', sid='5f00:0:2:100:1::'):
-                client.sendall(FRAME.pack(0x45565036, 4, op, 2, 1, 100 if op == 10 else member,
+                client.sendall(FRAME.pack(0x45565036, 5, op, 2, 1, 100 if op == 10 else member,
                                socket.inet_pton(socket.AF_INET6, peer) if op == 10 else bytes(16),
                                socket.inet_pton(socket.AF_INET6, sid if op == 10 else peer),
                                identity, bytes(10), 0, flags, bytes(3)))
@@ -217,7 +224,7 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
             program(12, identity=201, member=101, flags=1)
             program(12, identity=201, member=102, flags=1)
             program(12, identity=201)
-            client.sendall(FRAME.pack(0x45565036, 4, 3, 2, 1, 100, remote + bytes(10),
+            client.sendall(FRAME.pack(0x45565036, 5, 3, 2, 1, 100, remote + bytes(10),
                            bytes(16), 201, bytes(10), 0, 2, bytes(3)))
             wait_for(lambda: '02:00:00:ff:00:99' in ctl('show l2fib verbose'))
             def destinations(count=32):
@@ -277,6 +284,8 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
             learn()
             expect(4, 1, MAC)
             client.close()
+            wait_for(lambda: "Zebra pending/pending" in ctl("show evpn srv6"))
+            assert "5f00:0:1:100:1::/128" not in ctl("show ip6 fib")
             connect()
             expect(6, 1, flags=1)  # Replay must register ES before MAC.
             expect(4, 1, MAC)

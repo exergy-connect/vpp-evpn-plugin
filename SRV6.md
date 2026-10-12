@@ -14,12 +14,14 @@ Build the plugin with FRR's `feature/srv6-evpn-bridging` branch:
 
 The Docker daemon needs `xform/vpp:linux-cp-srv6-route-sync`. The build copies
 working-tree sources, including uncommitted changes. FRR and VPP must use
-matching copies of protocol version 4 (`evpn_srv6_wire.h` in the plugin and
-`zebra/zebra_evpn_srv6_wire.h` in FRR).
+matching copies of protocol version 5 (`evpn_srv6_wire.h` in the plugin and
+`zebra/zebra_evpn_srv6_wire.h` in FRR). The SID-manager ZAPI context
+also carries the VNI; rebuild the FRR daemons together.
 
 ## Provisioning
 
-Provision the VPP bridge, EVI, access interfaces and endpoints:
+Provision the VPP bridge, EVI, access interfaces and endpoint expectations.
+VPP leaves the local SID routes pending until Zebra authorizes them:
 
 ```text
 create bridge-domain 100 learn 1 forward 1 uu-flood 1 flood 1 arp-term 0
@@ -47,6 +49,12 @@ owned ES instead of the metadata link's carrier.
 Configure FRR with matching VNI, source and SIDs:
 
 ```text
+segment-routing
+ srv6
+  locators
+   locator pe2
+    prefix 5f00:0:1::/48 block-len 32 node-len 16 func-bits 32
+!
 evpn mh startup-delay 1
 evpn mh redirect-off
 router bgp 65000
@@ -60,6 +68,18 @@ router bgp 65000
  exit-address-family
 ```
 
+BGP requests the configured End.DT2U and End.DT2M addresses through Zebra's
+standard SID-manager ZAPI. Zebra reserves the explicit functions, records BGP
+ownership and the VNI context, and programs the VPP endpoints. The 32-bit
+function spans the EVI and behavior hextets; these full service SIDs must not
+use a uSID locator that interprets the behavior hextet as an argument.
+`show segment-routing srv6 sid` lists both allocations with their behavior,
+VNI, BGP owner, locator and explicit allocation type. BGP exports service
+routes only after both allocations succeed. Configuration removal, locator
+removal and BGP disconnect release ownership and withdraw VPP local routes;
+reconnect replays allocations. VPP checks Zebra's endpoints against its local
+service expectations and clears authorization on provider disconnect.
+
 `redirect-off` selects native Zebra MAC reprogramming on attachment failure;
 VPP does not implement bridge-port backup nexthop redirection.
 Enable the connection after FRR and interface metadata are ready:
@@ -72,8 +92,8 @@ show evpn srv6
 ```
 
 Omit `netns` when Zebra shares VPP's namespace. `evpn zebra disable` clears
-remote forwarding and withdraws client-owned local state. Local learning
-and local service endpoints survive reconnects.
+remote forwarding and withdraws client-owned local state. Local learning and local service configuration survive reconnects; Zebra
+replays endpoint authorization before the local SID routes become active.
 
 ## Control and forwarding
 
@@ -129,6 +149,7 @@ Run in disposable privileged containers with matching binaries:
 ```sh
 python3 test/srv6_mh_vpp.py  # real Ethernet/SRv6 packets, NHGs, DF/filtering
 python3 test/srv6_mh_frr.py  # real Zebra + bgpd, native local ownership/ZAPI
+python3 test/srv6_sid_lifecycle.py  # real bgpd + Zebra + VPP, SID ownership/restart
 ```
 
 On the lab Docker host:

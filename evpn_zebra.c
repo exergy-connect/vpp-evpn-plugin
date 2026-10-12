@@ -61,6 +61,7 @@ flush_remote (void)
   pool_foreach (e, evpn_main.evis)
     if (evpn_srv6_service_exists (e->evi))
       evpn_srv6_flush (e->evi);
+  evpn_srv6_local_sid_reset ();
   evpn_srv6_control_reset ();
   vlib_worker_thread_barrier_release (evpn_main.vlib_main);
 }
@@ -670,6 +671,20 @@ receive_message (const struct evpn_srv6_msg *message)
       evpn_learn_replay ();
       EVPN_NOTICE ("Zebra SRv6 dataplane connected; replaying local state");
       return 0;
+    case EVPN_SRV6_LOCAL_SID:
+      {
+        if (!ready)
+          return -1;
+        evpn_evi_t *e = evi_for_vni (clib_net_to_host_u32 (message->vni));
+        ip6_address_t source, sid;
+        clib_memcpy (&source, message->key, 16);
+        clib_memcpy (&sid, message->sid, 16);
+        vlib_worker_thread_barrier_sync (evpn_main.vlib_main);
+        int rv = e ? evpn_srv6_local_sid (e->evi, &source, &sid,
+                                         message->type, message->add) : -1;
+        vlib_worker_thread_barrier_release (evpn_main.vlib_main);
+        return rv;
+      }
     case EVPN_SRV6_SYNC:
       if (!ready)
 	return -1;

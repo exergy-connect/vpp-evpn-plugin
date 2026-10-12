@@ -6,6 +6,7 @@ is simulated; route origination, MAC synchronization and DF election are FRR's.
 """
 import json
 import os
+import select
 import socket
 import struct
 import subprocess
@@ -55,7 +56,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='frr-mh-') as directory:
         os.chmod(directory, 0o777)
         zebra_config = Path(directory) / 'zebra.conf'
-        zebra_config.write_text('hostname mh-test\nevpn mh startup-delay 1\nevpn mh redirect-off\n')
+        zebra_config.write_text('hostname mh-test\nevpn mh startup-delay 1\nevpn mh redirect-off\nsegment-routing\n srv6\n  locators\n   locator mh-test\n    prefix 5f00:0:1::/48 block-len 32 node-len 16 func-bits 32\n')
         bgp_config = Path(directory) / 'bgpd.conf'
         bgp_config.write_text('''hostname mh-test
 router bgp 65000
@@ -104,19 +105,46 @@ router bgp 65000
                     while len(data) < FRAME.size:
                         data.extend(sock.recv(FRAME.size - len(data)))
                     fields = FRAME.unpack(data)
-                    assert fields[:3] == (0x45565036, 4, op), fields
+                    assert fields[:3] == (0x45565036, 5, op), fields
                 return sock
 
             def send(op, add=1, up=1):
                 name = 'br100' if op == 9 else 'BondEthernet1'
-                client.sendall(FRAME.pack(0x45565036, 4, op, 2 if op == 4 else 4, add, 100,
+                client.sendall(FRAME.pack(0x45565036, 5, op, 2 if op == 4 else 4, add, 100,
                                          MAC + bytes(10) if op == 4 else bytes(16), bytes(16),
                                          socket.if_nametoindex(name), ESI if op == 6 else bytes(10),
                                          10, up if op == 6 else 0, bytes(3)))
 
             wait_for(lambda: '100' in show('show evpn vni', 'zebra'))
+            def local_sids():
+                return json.loads(show('show segment-routing srv6 sid json', 'zebra'))
+            wait_for(lambda: 'End.DT2U' in str(local_sids()) and 'End.DT2M' in str(local_sids()))
+            sid_table = show('show segment-routing srv6 sid', 'zebra')
+            assert 'bgp' in sid_table and 'explicit' in sid_table and 'VNI 100' in sid_table, sid_table
+            print('PASS: Zebra owns explicit End.DT2U/DT2M allocations for VNI 100', flush=True)
             client = connect()
+            pending_frames = bytearray()
+            def endpoints(add):
+                found = {}
+                end = time.monotonic() + 5
+                while time.monotonic() < end and len(found) < 2:
+                    if select.select([client], [], [], 0.1)[0]:
+                        chunk = client.recv(4096)
+                        assert chunk, 'provider disconnected while programming local SIDs'
+                        pending_frames.extend(chunk)
+                    while len(pending_frames) >= FRAME.size:
+                        fields = FRAME.unpack(pending_frames[:FRAME.size])
+                        del pending_frames[:FRAME.size]
+                        if fields[2] == 13 and fields[4] == add:
+                            found[fields[3]] = fields
+                assert set(found) == {2, 3}, found
+                for kind, fields in found.items():
+                    assert fields[5] == 100
+                    assert fields[6] == socket.inet_pton(socket.AF_INET6, '2001:db8::1')
+                    assert fields[7] == socket.inet_pton(socket.AF_INET6, f'5f00:0:1:100:{kind-1}::')
             send(9)
+            endpoints(1)
+            print('PASS: Zebra programs both owned local endpoints into its VPP provider', flush=True)
             send(6)
             wait_for(lambda: has_type(4) and has_type(1))
             wait_for(lambda: 'DF status: df' in show('show evpn es detail', 'zebra'))
@@ -142,6 +170,44 @@ router bgp 65000
             send(4)
             wait_for(lambda: has_mac() and has_type(4))
             print('PASS: disconnect withdrawals and local-state replay through ZAPI', flush=True)
+            subprocess.run(['vtysh', '-d', 'bgpd', '-c', 'configure terminal', '-c', 'router bgp 65000',
+                            '-c', 'address-family l2vpn evpn', '-c', 'vni 100', '-c', 'no srv6'], check=True)
+            wait_for(lambda: 'End.DT2' not in str(local_sids()))
+            endpoints(0)
+            subprocess.run(['vtysh', '-d', 'bgpd', '-c', 'configure terminal', '-c', 'router bgp 65000',
+                            '-c', 'address-family l2vpn evpn', '-c', 'vni 100',
+                            '-c', 'srv6 source 2001:db8::1 unicast 5f00:0:1:100:1:: multicast 5f00:0:1:100:2::'], check=True)
+            wait_for(lambda: 'End.DT2U' in str(local_sids()) and 'End.DT2M' in str(local_sids()))
+            print('PASS: Zebra releases and reallocates EVPN local SIDs on configuration change', flush=True)
+            subprocess.run(['vtysh', '-d', 'bgpd', '-c', 'configure terminal', '-c', 'router bgp 65000',
+                            '-c', 'address-family l2vpn evpn', '-c', 'vni 100',
+                            '-c', 'srv6 source 2001:db8::1 unicast 2001:db8:dead::1 multicast 2001:db8:dead::2'], check=True)
+            wait_for(lambda: 'End.DT2' not in str(local_sids()))
+            wait_for(lambda: not has_type(2) and not has_type(3))
+            print('PASS: unallocatable SIDs fail closed without EVPN service advertisements', flush=True)
+            subprocess.run(['vtysh', '-d', 'bgpd', '-c', 'configure terminal', '-c', 'router bgp 65000',
+                            '-c', 'address-family l2vpn evpn', '-c', 'vni 100',
+                            '-c', 'srv6 source 2001:db8::1 unicast 5f00:0:1:100:1:: multicast 5f00:0:1:100:2::'], check=True)
+            wait_for(lambda: 'End.DT2U' in str(local_sids()) and 'End.DT2M' in str(local_sids()))
+            daemons[1].terminate()
+            daemons[1].wait(timeout=5)
+            Path('/run/frr/bgpd.vty').unlink(missing_ok=True)
+            wait_for(lambda: 'End.DT2' not in str(local_sids()))
+            log = open(Path(directory) / 'bgpd-restart.log', 'w+')
+            logs.append(log)
+            daemons.append(subprocess.Popen(['/usr/lib/frr/bgpd', '-f', '/dev/null',
+                            '-i', '/run/frr/bgpd.pid', '--vty_socket', '/run/frr',
+                            '-z', '/run/frr/zserv.api', '-S', '-p', '0'], stdout=log, stderr=log))
+            wait_for(lambda: Path('/run/frr/bgpd.vty').exists())
+            subprocess.run(['vtysh', '-d', 'bgpd', '-f', str(bgp_config)], check=True)
+            wait_for(lambda: 'End.DT2U' in str(local_sids()) and 'End.DT2M' in str(local_sids()))
+            print('PASS: BGP disconnect releases SID ownership; reconnect restores allocations', flush=True)
+            subprocess.run(['vtysh', '-d', 'zebra', '-c', 'configure terminal', '-c', 'segment-routing',
+                            '-c', 'srv6', '-c', 'locators', '-c', 'no locator mh-test'], check=True)
+            wait_for(lambda: 'End.DT2' not in str(local_sids()))
+            subprocess.run(['vtysh', '-d', 'zebra', '-f', str(zebra_config)], check=True)
+            wait_for(lambda: 'End.DT2U' in str(local_sids()) and 'End.DT2M' in str(local_sids()))
+            print('PASS: locator deletion withdraws allocations; recreation retries pending SIDs', flush=True)
         finally:
             if client:
                 client.close()
