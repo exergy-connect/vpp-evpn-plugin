@@ -171,3 +171,43 @@ split-horizon drops do not change that classification. Native
 `clear sr localsid counters` resets these aggregates. For example,
 `5f00:0:1:100:1::` contributes to `5f00:0:1::/48` and
 `5f00:0:1:100::/64`, but not `5f00:0:1::/64`.
+
+## IOS XR SRv6 EVPN interoperability
+
+FRR accepts End.DT2U/End.DT2M and uDT2U/uDT2M (behavior codes 67/68).
+For EVPN RT2 and per-EVI RT1, it reconstructs the service SID using the
+high transposition-length bits of the raw 24-bit NLRI label. For RT3 it uses
+the PMSI label instead. The IPv6 BGP next hop identifies the remote PE even
+when XR advertises an IPv4 originating router address in its IMET NLRI.
+Zebra sends the reconstructed destination to VPP; VPP needs no uSID shifting
+when sending directly to a remote service endpoint.
+
+FRR advertises a 16-bit Arg.FE2 reservation on its multicast SID and no
+argument on its unicast SID. Unused address bits are not an argument.
+The current VPP local endpoint supports local-bias split horizon; nonzero
+remote ESI-filtering arguments and local uDT2U/uDT2M termination are outside
+this implementation.
+
+The Ethernet IPv6 next header defaults to RFC 8986 value 143. VPP also accepts
+legacy XR value 65 on receive. For a peer that requires 65, select it for
+outgoing traffic on the service:
+
+```text
+evpn srv6 next-header 65 evi 100
+```
+
+The setting applies to all remote destinations in that EVI, and can also be
+provided as `next-header 65` when creating the service. `show evpn srv6`
+displays the setting. Use 143 for mixed domains unless every peer accepts 65.
+The setting is configuration and must be replayed when VPP restarts.
+
+Checks: FRR's `test_evpn_srv6_sid` covers full SID, 16/24-bit and non-byte-aligned
+transposition, and invalid structures. `test_attr_parse` covers XR behaviors
+and L2 versus L3 transposition bounds. `test/srv6_mh_vpp.py` exercises actual
+Ethernet decapsulation with next headers 143/65, rejects unsupported protocols,
+and checks 65 on transmit along with MAC/NHG replacement and split horizon.
+
+On the XRd 26.2.1 control-plane lab, the corrected BGP routes and reconstructed
+multicast destination were verified. HA's encapsulated ARP requests arrive
+on PE3's core interface, but PE3 does not emit them on HB's access interface;
+end-to-end forwarding is not validated by those control-plane checks.

@@ -53,6 +53,7 @@ typedef enum
   EVPN_SRV6_COMMAND_IMET,
   EVPN_SRV6_COMMAND_MAC,
   EVPN_SRV6_COMMAND_FLUSH,
+  EVPN_SRV6_COMMAND_NEXT_HEADER,
 } evpn_srv6_command_kind_t;
 enum
 {
@@ -83,6 +84,7 @@ typedef struct
   ip6_address_t source, unicast, multicast;
   u32 rx[EVPN_SRV6_MODE_COUNT];
   u8 active[EVPN_SRV6_MODE_COUNT];
+  u8 next_header; /* 143 (RFC 8986), or legacy XR Ethernet value 65. */
   u64 decap[EVPN_SRV6_MODE_COUNT];
 } evpn_srv6_service_t;
 typedef struct
@@ -302,7 +304,7 @@ srv6_tx (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
               ip->ip_version_traffic_class_and_flow_label =
                 clib_host_to_net_u32 ((u32) EVPN_SRV6_IP_VERSION << EVPN_SRV6_IP_VERSION_SHIFT);
               ip->payload_length = clib_host_to_net_u16 (length);
-              ip->protocol = IP_PROTOCOL_IP6_ETHERNET; /* RFC 8986 Ethernet payload */
+              ip->protocol = s->next_header ? s->next_header : IP_PROTOCOL_IP6_ETHERNET;
               ip->hop_limit = EVPN_SRV6_DEFAULT_HOP_LIMIT;
               ip->src_address = s->source;
               ip->dst_address = *sid;
@@ -459,7 +461,7 @@ VLIB_NODE_FN (evpn_srv6_input_node)
                   offset += len;
                 }
             }
-          if (proto == IP_PROTOCOL_IP6_ETHERNET &&
+          if ((proto == IP_PROTOCOL_IP6_ETHERNET || proto == 65) &&
               b->current_length >= offset + sizeof (ethernet_header_t) && ip->hop_limit > 0 &&
               (clib_net_to_host_u32 (ip->ip_version_traffic_class_and_flow_label) >>
                EVPN_SRV6_IP_VERSION_SHIFT) == EVPN_SRV6_IP_VERSION &&
@@ -777,7 +779,7 @@ evpn_srv6_flush (u32 evi)
 static clib_error_t *
 srv6_command (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
 {
-  u32 evi = ~0, bd = ~0;
+  u32 evi = ~0, bd = ~0, next_header = IP_PROTOCOL_IP6_ETHERNET;
   u8 add = EVPN_SRV6_ADD;
   evpn_srv6_command_kind_t kind = EVPN_SRV6_COMMAND_NONE;
   ip6_address_t source = {}, u = {}, m = {}, sid = {};
@@ -798,6 +800,11 @@ srv6_command (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
         add = EVPN_SRV6_DELETE;
       else if (unformat (input, "evi %u", &evi))
         {
+        }
+      else if (unformat (input, "next-header %u", &next_header))
+        {
+          if (kind == EVPN_SRV6_COMMAND_NONE)
+            kind = EVPN_SRV6_COMMAND_NEXT_HEADER;
         }
       else if (unformat (input, "bd %u", &bd))
         {
@@ -822,20 +829,32 @@ srv6_command (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
     }
   if (evi == ~0 || kind == EVPN_SRV6_COMMAND_NONE)
     return clib_error_return (0, "service|imet|mac|flush and evi required");
+  if (next_header != IP_PROTOCOL_IP6_ETHERNET && next_header != 65)
+    return clib_error_return (0, "Ethernet next-header must be 143 or 65");
+  if (kind == EVPN_SRV6_COMMAND_NEXT_HEADER)
+    {
+      u32 si = service_find (evi);
+      if (si == ~0)
+        return clib_error_return (0, "SRv6 service does not exist");
+      pool_elt_at_index (services, si)->next_header = next_header;
+      return 0;
+    }
   int rv =
     kind == EVPN_SRV6_COMMAND_SERVICE ?
       (add ? evpn_srv6_service_add (evi, bd, &source, &u, &m) : evpn_srv6_service_del (evi)) :
     kind == EVPN_SRV6_COMMAND_IMET ? evpn_srv6_imet (evi, &sid, add) :
     kind == EVPN_SRV6_COMMAND_MAC  ? evpn_srv6_mac (evi, &mac, &sid, add) :
                                      evpn_srv6_flush (evi);
+  if (!rv && add && kind == EVPN_SRV6_COMMAND_SERVICE)
+    pool_elt_at_index (services, service_find (evi))->next_header = next_header;
   return rv ? clib_error_return (0, "evpn srv6 failed: %d", rv) : 0;
 }
 VLIB_CLI_COMMAND (evpn_srv6_command, static) = {
   .path = "evpn srv6",
   .function = srv6_command,
   .short_help = "evpn srv6 service add evi <id> bd <id> source <ip6> unicast <sid> "
-                "multicast <sid> | service del evi <id> | imet add|del evi <id> sid "
-                "<sid> | mac add|del evi <id> <mac> [sid <sid>] | flush evi <id>"
+                "multicast <sid> [next-header 143|65] | service del evi <id> | imet add|del evi <id> sid "
+                "<sid> | mac add|del evi <id> <mac> [sid <sid>] | flush evi <id> | next-header 143|65 evi <id>"
 };
 static clib_error_t *
 show_srv6 (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
@@ -845,12 +864,13 @@ show_srv6 (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
   pool_foreach (s, services)
     {
       vlib_cli_output (
-        vm, "evi %u source %U End.DT2U %U packets %llu End.DT2M %U packets %llu Zebra %s/%s",
+        vm, "evi %u source %U End.DT2U %U packets %llu End.DT2M %U packets %llu Zebra %s/%s next-header %u",
         s->evi, format_ip6_address, &s->source, format_ip6_address, &s->unicast,
         s->decap[EVPN_SRV6_MODE_UNICAST], format_ip6_address, &s->multicast,
         s->decap[EVPN_SRV6_MODE_MULTICAST],
         s->active[EVPN_SRV6_MODE_UNICAST] ? "active" : "pending",
-        s->active[EVPN_SRV6_MODE_MULTICAST] ? "active" : "pending");
+        s->active[EVPN_SRV6_MODE_MULTICAST] ? "active" : "pending",
+        s->next_header ? s->next_header : IP_PROTOCOL_IP6_ETHERNET);
     }
   pool_foreach (p, ports)
     if (!p->receive)
