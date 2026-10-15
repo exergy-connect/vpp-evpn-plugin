@@ -14,7 +14,7 @@ Build the plugin with FRR's `feature/srv6-evpn-bridging` branch:
 
 The Docker daemon needs `xform/vpp:linux-cp-srv6-route-sync`. The build copies
 working-tree sources, including uncommitted changes. FRR and VPP must use
-matching copies of protocol version 5 (`evpn_srv6_wire.h` in the plugin and
+matching copies of protocol version 6 (`evpn_srv6_wire.h` in the plugin and
 `zebra/zebra_evpn_srv6_wire.h` in FRR). The SID-manager ZAPI context
 also carries the VNI; rebuild the FRR daemons together.
 
@@ -140,7 +140,12 @@ SIDs. Native FRR retains per-EVI A-D on a down ES by default.
 Current scope is bridged services, full SIDs, default IPv6 FIB, native
 all-active nexthop groups and DF/local-bias filtering. SID transposition,
 IRB, ESI SID arguments and service carving remain outside this backend.
-Linux control metadata must describe every access bridge/VLAN attachment.
+Linux control metadata uses one VLAN-aware bridge for access and trunk ports.
+Each VNI has a VXLAN metadata interface whose PVID identifies its VLAN; service
+registration carries that VXLAN ifindex. These metadata interfaces do not carry
+VXLAN traffic. A trunk bond uses one ESI with per-VNI ES membership, DF state,
+and split-horizon filtering. Local MAC events identify the parent bond and VNI;
+synchronized MACs resolve to the VPP subinterface in that VNI's bridge domain.
 
 ## Validation
 

@@ -140,6 +140,9 @@ done:
 static u32
 linux_for_vpp (u32 swi)
 {
+  /* Linux models a tagged VPP attachment as VLAN membership on its parent. */
+  vnet_sw_interface_t *sw = vnet_get_sw_interface (evpn_main.vnet_main, swi);
+  swi = sw->sup_sw_if_index;
   u8 *name = format (0, "%U%c", format_vnet_sw_if_index_name, evpn_main.vnet_main, swi, 0);
   const char *n = (char *) name;
   if (!strncmp (n, "host-", 5))
@@ -149,14 +152,18 @@ linux_for_vpp (u32 swi)
   return index;
 }
 static u32
-vpp_for_linux (u32 index)
+vpp_for_linux (u32 index, u32 bd_index)
 {
   if (!index)
     return ~0;
   vnet_sw_interface_t *sw;
   pool_foreach (sw, evpn_main.vnet_main->interface_main.sw_interfaces)
     if (linux_for_vpp (sw->sw_if_index) == index)
-      return sw->sw_if_index;
+      {
+        l2_input_config_t *l2 = l2input_intf_config (sw->sw_if_index);
+        if ((l2->flags & L2_INPUT_FLAG_BRIDGE) && l2->bd_index == bd_index)
+          return sw->sw_if_index;
+      }
   return ~0;
 }
 
@@ -519,9 +526,13 @@ es_command (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
 	if (es_for_interface (mac->evi, mac->sw_if_index) == &local_es[i])
 	  send_mac (mac, 0);
       send_es (&local_es[i], 0);
-      mh_feature (local_es[i].sw_if_index, 0);
       vec_free (local_es[i].peers);
       vec_del1 (local_es, i);
+      u8 shared = 0;
+      vec_foreach (other, local_es)
+        if (other->sw_if_index == config.sw_if_index)
+          shared = 1;
+      mh_feature (config.sw_if_index, shared);
     }
   if (add)
     {
@@ -600,12 +611,12 @@ send_services (void)
   pool_foreach (e, evpn_main.evis)
     if (evpn_srv6_service_exists (e->evi))
       {
-	u8 *name = format (0, "br%u%c", bd_get (e->bd_index)->bd_id, 0);
+	u8 *name = format (0, "vxlan%u%c", e->vni, 0);
 	u32 index = linux_index ((char *) name);
 	vec_free (name);
 	if (!index)
 	  {
-	    EVPN_WARN ("Missing Linux bridge metadata for VNI %u", e->vni);
+	    EVPN_WARN ("Missing Linux VXLAN metadata for VNI %u", e->vni);
 	    continue;
 	  }
 	struct evpn_srv6_msg m = {
@@ -640,7 +651,7 @@ route_update (const struct evpn_srv6_msg *m)
     return evpn_srv6_mac_nhg (e->evi, &mac, clib_net_to_host_u32 (m->sw_if_index));
   if (m->flags == 1)
     {
-      u32 swi = vpp_for_linux (clib_net_to_host_u32 (m->sw_if_index));
+      u32 swi = vpp_for_linux (clib_net_to_host_u32 (m->sw_if_index), e->bd_index);
       return swi == ~0 ? -1 : evpn_srv6_mac_local (e->evi, &mac, &sid, swi);
     }
   return evpn_srv6_mac (e->evi, &mac, &sid, 1);
