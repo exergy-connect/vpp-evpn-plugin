@@ -216,3 +216,38 @@ On the XRd 26.2.1 control-plane lab, the corrected BGP routes and reconstructed
 multicast destination were verified. HA's encapsulated ARP requests arrive
 on PE3's core interface, but PE3 does not emit them on HB's access interface;
 end-to-end forwarding is not validated by those control-plane checks.
+
+
+### Multihoming hash policy
+
+Each SRv6 EVI defaults to `layer3+4`: remote Zebra nexthop-group member
+selection includes inner IP addresses and transport ports (plus the IPv6 flow
+label). UET, MRC, and Falcon UDP source-port entropy can therefore select
+different remote PEs within one transport connection. Fragmented IPv4 packets
+(MF or a nonzero offset) and IPv6 packets with a Fragment header exclude ports
+and flow labels, including fragment zero. Their address/protocol hash is shared
+by all fragments for both remote PE selection and outer ECMP. IPv6 Fragment
+headers are detected after Hop-by-Hop, Routing, Destination Options, and AH
+headers.
+
+Configure a service at runtime with:
+
+```text
+evpn srv6 hash-policy layer3+4 evi 100
+evpn srv6 hash-policy layer2+3 evi 100
+evpn srv6 hash-policy layer2 evi 100
+show evpn srv6
+```
+
+`layer2` uses inner MAC addresses and EtherType. `layer2+3` additionally uses
+inner IPv4/IPv6 addresses, excluding ports and flow labels. These are field
+selection policies with Linux bond naming, not Linux's exact hash algorithm.
+The setting is per EVI and appears in `show evpn srv6`; re-created services
+start with the default. Invalid policies and missing services are rejected.
+
+Independently of remote PE selection, encapsulation derives the outer IPv6
+flow label from the inner packet hash, exposing transport entropy to underlay
+ECMP. Choosing an L2 member policy does not disable underlay path diversity.
+
+In xForm, set `evpn.hash_policy: layer2+3` (or `layer2` / `layer3+4`) on the
+node or topology. The default is `layer3+4`.

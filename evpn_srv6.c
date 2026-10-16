@@ -7,6 +7,7 @@
 #include <vnet/dpo/dpo.h>
 #include <vnet/ip/ip6_packet.h>
 #include <vnet/l2/l2_output.h>
+#include <vnet/l2/l2_input.h>
 #include <vnet/srv6/sr.h>
 
 /* EVPN route types and Zebra NHG update flags retain their wire values. */
@@ -74,8 +75,14 @@ enum
   EVPN_SRV6_MAC_LOCAL_BIT = 0x02,
   EVPN_SRV6_MIN_ETHERTYPE = 0x0600,
 };
-#define EVPN_SRV6_FNV1A_OFFSET_BASIS 2166136261u
-#define EVPN_SRV6_FNV1A_PRIME        16777619u
+
+typedef enum
+{
+  EVPN_SRV6_HASH_LAYER34, /* Default includes inner transport ports. */
+  EVPN_SRV6_HASH_LAYER2,
+  EVPN_SRV6_HASH_LAYER23,
+} evpn_srv6_hash_policy_t;
+static const char *srv6_hash_names[] = { "layer3+4", "layer2", "layer2+3" };
 
 /* Keep native SRv6 state separate from the existing VXLAN object pools. */
 typedef struct
@@ -84,6 +91,7 @@ typedef struct
   ip6_address_t source, unicast, multicast;
   u32 rx[EVPN_SRV6_MODE_COUNT];
   u8 active[EVPN_SRV6_MODE_COUNT];
+  u8 hash_policy;
   u8 next_header; /* 143 (RFC 8986), or legacy XR Ethernet value 65. */
   u64 decap[EVPN_SRV6_MODE_COUNT];
 } evpn_srv6_service_t;
@@ -234,20 +242,16 @@ evpn_srv6_vtep (u32 evi, ip6_address_t *peer, ip6_address_t *sid, u8 add)
     }
   return 0;
 }
-/* Stable Ethernet hash selects among the group supplied by Zebra. */
+/* Preserve inner path entropy when selecting a remote multihoming PE. */
 static const ip6_address_t *
-nhg_sid (u32 evi, u32 id, const ethernet_header_t *eth)
+nhg_sid (u32 evi, u32 id, u32 flow_hash)
 {
   srv6_nh_t *n = nh_find (id);
   if (!n || !n->ready)
     return 0;
   if (n->group)
     {
-      u32 hash = EVPN_SRV6_FNV1A_OFFSET_BASIS;
-      const u8 *bytes = (const u8 *) eth;
-      for (u32 i = 0; i < sizeof (eth->dst_address) + sizeof (eth->src_address); i++)
-        hash = (hash ^ bytes[i]) * EVPN_SRV6_FNV1A_PRIME;
-      n = nh_find (n->members[hash % vec_len (n->members)]);
+      n = nh_find (n->members[flow_hash % vec_len (n->members)]);
       if (!n || n->group || !n->ready)
         return 0;
     }
@@ -275,6 +279,91 @@ format_srv6_port (u8 *s, va_list *args)
   u32 index = va_arg (*args, u32);
   return format (s, "evpn-srv6%u", index);
 }
+/* Every fragment of a datagram must use the same inputs, including the
+ * first fragment which still contains ports. Detect IPv6 Fragment headers
+ * through the extension chain before calling VPP's transport hash. */
+static u32
+srv6_inner_hash (vlib_buffer_t *b)
+{
+  const u8 *eth = vlib_buffer_get_current (b);
+  u32 l2_len = vnet_buffer (b)->l2.l2_len;
+  if (l2_len < sizeof (ethernet_header_t) || b->current_length < l2_len)
+    return 0;
+  u16 type = ((u16) eth[l2_len - 2] << 8) | eth[l2_len - 1];
+  const u8 *ip = eth + l2_len, *addresses = 0;
+  u32 length = b->current_length - l2_len, address_len = 0;
+  u8 fragmented = 0, protocol = 0;
+  if (type == ETHERNET_TYPE_IP4 && length >= 20)
+    {
+      addresses = ip + 12;
+      address_len = 8;
+      protocol = ip[9];
+      fragmented = ((((u16) ip[6] << 8) | ip[7]) & 0x3fff) != 0;
+    }
+  else if (type == ETHERNET_TYPE_IP6 && length >= 40)
+    {
+      addresses = ip + 8;
+      address_len = 32;
+      protocol = ip[6];
+      u32 offset = 40;
+      while (protocol == 0 || protocol == 43 || protocol == 60 ||
+             protocol == 51 || protocol == 44)
+        {
+          if (protocol == 44)
+            {
+              /* Do not inspect fragment payload (even on fragment zero).
+               * Use Fragment as the protocol for every fragment, so headers
+               * following it cannot change member or outer ECMP selection. */
+              fragmented = 1;
+              break;
+            }
+          if (offset + 2 > length)
+            break;
+          u32 size = protocol == 51 ? ((u32) ip[offset + 1] + 2) * 4 :
+                                     ((u32) ip[offset + 1] + 1) * 8;
+          if (offset + size > length)
+            break;
+          protocol = ip[offset];
+          offset += size;
+        }
+    }
+  if (!fragmented)
+    return vnet_l2_compute_flow_hash (b);
+  u32 hash = (2166136261u ^ protocol) * 16777619u;
+  for (u32 i = 0; i < address_len; i++)
+    hash = (hash ^ addresses[i]) * 16777619u;
+  return hash;
+}
+
+/* Policy names follow Linux bond naming; selection hashes the inner frame.
+ * Outer ECMP always retains the inner L4 entropy independently of this policy. */
+static u32
+srv6_member_hash (vlib_buffer_t *b, u8 policy, u32 l34_hash)
+{
+  if (policy == EVPN_SRV6_HASH_LAYER34)
+    return l34_hash;
+  const u8 *eth = vlib_buffer_get_current (b);
+  u32 hash = 2166136261u;
+  for (u32 i = 0; i < 12; i++)
+    hash = (hash ^ eth[i]) * 16777619u;
+  u16 l2_len = vnet_buffer (b)->l2.l2_len;
+  u16 type = ((u16) eth[l2_len - 2] << 8) | eth[l2_len - 1];
+  hash = (hash ^ type) * 16777619u;
+  if (policy == EVPN_SRV6_HASH_LAYER23)
+    {
+      const u8 *ip = eth + l2_len;
+      const u8 *addresses = 0;
+      u32 size = 0;
+      if (type == ETHERNET_TYPE_IP4 && b->current_length >= l2_len + 20)
+        { addresses = ip + 12; size = 8; }
+      else if (type == ETHERNET_TYPE_IP6 && b->current_length >= l2_len + 40)
+        { addresses = ip + 8; size = 32; }
+      for (u32 i = 0; i < size; i++)
+        hash = (hash ^ addresses[i]) * 16777619u;
+    }
+  return hash;
+}
+
 static uword
 srv6_tx (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
@@ -290,10 +379,15 @@ srv6_tx (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
         {
           evpn_srv6_service_t *s = pool_elt_at_index (services, p->service);
           u32 length = vlib_buffer_length_in_chain (vm, b);
+          /* L2 input has set l2_len, including any VLAN tags. The inner
+           * UDP source port is per-packet entropy for spraying transports;
+           * preserve it across both PE selection and underlay ECMP. */
+          u32 flow_hash = srv6_inner_hash (b);
           const ip6_address_t *sid = &p->sid;
           if (p->nhg_id)
             sid = length >= sizeof (ethernet_header_t) ?
-                    nhg_sid (s->evi, p->nhg_id, vlib_buffer_get_current (b)) :
+                    nhg_sid (s->evi, p->nhg_id,
+                             srv6_member_hash (b, s->hash_policy, flow_hash)) :
                     0;
           if (sid && length <= UINT16_MAX &&
               b->current_data >= -(VLIB_BUFFER_PRE_DATA_SIZE - (int) sizeof (ip6_header_t)))
@@ -302,7 +396,8 @@ srv6_tx (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
               ip6_header_t *ip = vlib_buffer_get_current (b);
               clib_memset (ip, 0, sizeof (*ip));
               ip->ip_version_traffic_class_and_flow_label =
-                clib_host_to_net_u32 ((u32) EVPN_SRV6_IP_VERSION << EVPN_SRV6_IP_VERSION_SHIFT);
+                clib_host_to_net_u32 (((u32) EVPN_SRV6_IP_VERSION << EVPN_SRV6_IP_VERSION_SHIFT) |
+                                      (flow_hash & 0xfffff));
               ip->payload_length = clib_host_to_net_u16 (length);
               ip->protocol = s->next_header ? s->next_header : IP_PROTOCOL_IP6_ETHERNET;
               ip->hop_limit = EVPN_SRV6_DEFAULT_HOP_LIMIT;
@@ -857,6 +952,37 @@ VLIB_CLI_COMMAND (evpn_srv6_command, static) = {
                 "<sid> | mac add|del evi <id> <mac> [sid <sid>] | flush evi <id> | next-header 143|65 evi <id>"
 };
 static clib_error_t *
+srv6_hash_policy_command (vlib_main_t *vm, unformat_input_t *input,
+                          vlib_cli_command_t *cmd)
+{
+  u32 evi = ~0;
+  u8 policy = EVPN_SRV6_HASH_LAYER34;
+  if (unformat (input, "layer3+4"))
+    policy = EVPN_SRV6_HASH_LAYER34;
+  else if (unformat (input, "layer2+3"))
+    policy = EVPN_SRV6_HASH_LAYER23;
+  else if (unformat (input, "layer2"))
+    policy = EVPN_SRV6_HASH_LAYER2;
+  else
+    return clib_error_return (0, "hash policy must be layer2, layer2+3 or layer3+4");
+  if (!unformat (input, "evi %u", &evi) ||
+      unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    return clib_error_return (0, "evi required; unexpected trailing input");
+  u32 si = service_find (evi);
+  if (si == ~0)
+    return clib_error_return (0, "SRv6 service does not exist");
+  vlib_worker_thread_barrier_sync (vm);
+  pool_elt_at_index (services, si)->hash_policy = policy;
+  vlib_worker_thread_barrier_release (vm);
+  return 0;
+}
+VLIB_CLI_COMMAND (evpn_srv6_hash_policy_command, static) = {
+  .path = "evpn srv6 hash-policy",
+  .function = srv6_hash_policy_command,
+  .short_help = "evpn srv6 hash-policy layer2|layer2+3|layer3+4 evi <id>",
+};
+
+static clib_error_t *
 show_srv6 (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
 {
   evpn_srv6_service_t *s;
@@ -864,13 +990,14 @@ show_srv6 (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
   pool_foreach (s, services)
     {
       vlib_cli_output (
-        vm, "evi %u source %U End.DT2U %U packets %llu End.DT2M %U packets %llu Zebra %s/%s next-header %u",
+        vm, "evi %u source %U End.DT2U %U packets %llu End.DT2M %U packets %llu Zebra %s/%s next-header %u hash-policy %s",
         s->evi, format_ip6_address, &s->source, format_ip6_address, &s->unicast,
         s->decap[EVPN_SRV6_MODE_UNICAST], format_ip6_address, &s->multicast,
         s->decap[EVPN_SRV6_MODE_MULTICAST],
         s->active[EVPN_SRV6_MODE_UNICAST] ? "active" : "pending",
         s->active[EVPN_SRV6_MODE_MULTICAST] ? "active" : "pending",
-        s->next_header ? s->next_header : IP_PROTOCOL_IP6_ETHERNET);
+        s->next_header ? s->next_header : IP_PROTOCOL_IP6_ETHERNET,
+        srv6_hash_names[s->hash_policy]);
     }
   pool_foreach (p, ports)
     if (!p->receive)

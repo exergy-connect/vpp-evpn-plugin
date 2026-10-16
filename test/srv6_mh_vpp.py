@@ -282,6 +282,108 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
                 return found
             expected = {'5f00:0:2:100:1::', '5f00:0:3:100:1::'}
             assert destinations() == expected, ctl('show evpn srv6')
+            # One transport connection must spray without changing MAC/IP
+            # endpoints: only SITG's 64 UDP source-port entropy values vary.
+            next_macs = {bytes.fromhex(f'020000abcd{i:02x}') for i in range(1, 5)}
+            hops = []
+            for i in range(1, 5):
+                mac = f'02:00:00:ab:cd:{i:02x}'
+                address = f'2001:db8:ffff::{i + 10}'
+                ctl(f'set ip neighbor host-mh-core {address} {mac}')
+                hops.append(f'via {address} host-mh-core')
+            ctl('ip route add 5f00::/16 ' + ' '.join(hops))
+
+            def spray(protocol, dport, ipv6, expected_peers=2):
+                wire.setblocking(False)
+                try:
+                    while wire.recv(4096): pass
+                except BlockingIOError: pass
+                for entropy in range(10000, 10064):
+                    udp = struct.pack('!HHHH', entropy, dport, 24, 0) + b'path-entropy-test'
+                    if ipv6:
+                        ip = struct.pack('!IHBB', (6 << 28) | entropy, len(udp), 17, 64)
+                        ip += socket.inet_pton(socket.AF_INET6, '2001:db8:1::1')
+                        ip += socket.inet_pton(socket.AF_INET6, '2001:db8:1::2')
+                        etype = bytes.fromhex('86dd')
+                    else:
+                        ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), 0, 0x4000,
+                                         64, 17, 0, socket.inet_aton('192.0.2.1'), socket.inet_aton('192.0.2.2'))
+                        etype = bytes.fromhex('0800')
+                    access.send(remote + MAC + etype + ip + udp)
+                wire.settimeout(0.5)
+                labels, peers, paths, count = set(), set(), set(), 0
+                try:
+                    while True:
+                        data = wire.recv(4096)
+                        if len(data) < 54 or data[12:14] != b'\x86\xdd' or data[20] != 143:
+                            continue
+                        if b'path-entropy-test' not in data:
+                            continue
+                        labels.add(struct.unpack('!I', data[14:18])[0] & 0xfffff)
+                        peers.add(socket.inet_ntop(socket.AF_INET6, data[38:54]))
+                        paths.add(data[:6])
+                        count += 1
+                except socket.timeout: pass
+                assert count == 64, (protocol, ipv6, 'packet count', count)
+                assert len(labels) > 32, (protocol, ipv6, 'lost entropy', labels)
+                assert peers <= expected and len(peers) == expected_peers, (protocol, ipv6, 'PE selection', peers)
+                assert paths == next_macs, (protocol, ipv6, 'ECMP buckets', paths)
+                print('PASS:', protocol, 'UDP6' if ipv6 else 'UDP4',
+                      '64 packets,', expected_peers, 'remote PEs, all four ECMP paths', flush=True)
+            assert 'hash-policy layer3+4' in ctl('show evpn srv6')
+            for protocol, dport in [('UET', 4793), ('MRC', 4791), ('Falcon', 4794)]:
+                for ipv6 in [False, True]:
+                    spray(protocol, dport, ipv6)
+            def fragments(ipv6):
+                wire.setblocking(False)
+                try:
+                    while wire.recv(4096): pass
+                except BlockingIOError: pass
+                for i in range(64):
+                    # Fragment zero has ports, later fragments have arbitrary
+                    # payload in the same position. Neither may affect hashing.
+                    payload = struct.pack('!HHHH', 10000 + i, 4793, 24, 0) + b'fragment-hash-test'
+                    first = i % 2 == 0
+                    if ipv6:
+                        ip = struct.pack('!IHBB', (6 << 28) | i, 16 + len(payload), 0, 64)
+                        ip += socket.inet_pton(socket.AF_INET6, '2001:db8:1::1')
+                        ip += socket.inet_pton(socket.AF_INET6, '2001:db8:1::2')
+                        ip += bytes([44, 0]) + bytes(6)  # Hop-by-Hop -> Fragment
+                        ip += struct.pack('!BBHI', 17, 0, 1 if first else 16, 12345)
+                        etype = bytes.fromhex('86dd')
+                    else:
+                        ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(payload), 12345,
+                                         0x2000 if first else 2, 64, 17, 0,
+                                         socket.inet_aton('192.0.2.1'), socket.inet_aton('192.0.2.2'))
+                        etype = bytes.fromhex('0800')
+                    access.send(remote + MAC + etype + ip + payload)
+                wire.settimeout(0.5)
+                labels, peers, paths, count = set(), set(), set(), 0
+                try:
+                    while True:
+                        data = wire.recv(4096)
+                        if len(data) < 54 or data[12:14] != b'\x86\xdd' or data[20] != 143 or b'fragment-hash-test' not in data:
+                            continue
+                        labels.add(struct.unpack('!I', data[14:18])[0] & 0xfffff)
+                        peers.add(data[38:54])
+                        paths.add(data[:6])
+                        count += 1
+                except socket.timeout: pass
+                assert count == 64, ('fragments', ipv6, count)
+                assert len(labels) == len(peers) == len(paths) == 1, (ipv6, labels, peers, paths)
+                print('PASS:', 'IPv6 extension-chain' if ipv6 else 'IPv4',
+                      'first and later fragments exclude ports and retain one PE/ECMP path', flush=True)
+            fragments(False)
+            fragments(True)
+            for policy in ['layer2', 'layer2+3']:
+                ctl(f'evpn srv6 hash-policy {policy} evi 100')
+                assert f'hash-policy {policy}' in ctl('show evpn srv6')
+                spray('UET-' + policy, 4793, False, expected_peers=1)
+            ctl('evpn srv6 hash-policy layer3+4 evi 100')
+            spray('UET-restored-default', 4793, False)
+            invalid = command('vppctl', '-s', cli, *'evpn srv6 hash-policy invalid evi 100'.split())
+            assert 'hash policy must be' in invalid or 'unknown input' in invalid, invalid
+            assert 'hash-policy layer3+4' in ctl('show evpn srv6')
             program(12, identity=201, flags=2)
             program(12, identity=201, member=102, flags=1)
             program(12, identity=201)
