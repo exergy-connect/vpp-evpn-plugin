@@ -853,6 +853,7 @@ evpn_evi_add (u32 evi, u32 vni, u32 bd_id, u8 irb,
 	em->gw_gen = 1;
       evpn_gw_refresh_evi (e);
     }
+  evpn_zebra_resync ();
   EVPN_DBG ("evi add %U", format_evpn_evi, e);
   return 0;
 }
@@ -908,6 +909,7 @@ evpn_evi_del (u32 evi)
   hash_unset (em->evi_by_bd, e->bd_index);
   hash_unset (em->evi_by_id, evi);
   pool_put (em->evis, e);
+  evpn_zebra_resync ();
   return 0;
 }
 

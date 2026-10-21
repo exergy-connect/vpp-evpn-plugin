@@ -33,6 +33,13 @@
 #   srv6_mh_lab.py --failover — received zero-SID A-D validity and live
 #     attachment failover/pings; run on the lab Docker host.
 
-# Zebra-owned SRv6 service SIDs (matching protocol v5 binaries):
+# Zebra-owned SRv6 service SIDs (matching protocol v7 binaries):
 #   srv6_sid_lifecycle.py — real bgpd/Zebra/VPP allocation, route activation,
 #     service removal and Zebra restart with ownership replay.
+
+# Dual-transport native FRR integration:
+#   vxlan_zebra.py — compiled VPP control/packet checks with IPv4/IPv6 VTEPs,
+#     local learning, MAC moves, withdrawal and reconnect ownership/replay.
+#   vxlan_frr.py — real FRR bgpd/Zebra + VPP interoperability with a Linux
+#     VXLAN peer: BGP Type-2/Type-3, ARP/ICMP and reconnect/replay.
+#   Run these in fresh privileged containers with matching version 7 binaries.

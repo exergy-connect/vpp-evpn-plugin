@@ -14,7 +14,7 @@ Build the plugin with FRR's `feature/srv6-evpn-bridging` branch:
 
 The Docker daemon needs `xform/vpp:linux-cp-srv6-route-sync`. The build copies
 working-tree sources, including uncommitted changes. FRR and VPP must use
-matching copies of protocol version 6 (`evpn_srv6_wire.h` in the plugin and
+matching copies of protocol version 7 (`evpn_srv6_wire.h` in the plugin and
 `zebra/zebra_evpn_srv6_wire.h` in FRR). The SID-manager ZAPI context
 also carries the VNI; rebuild the FRR daemons together.
 

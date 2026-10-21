@@ -83,20 +83,32 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
             received = bytearray()
 
             def frame(op):
-                return FRAME.pack(0x45565036, 6, op, 0, 0, 0, bytes(16), bytes(16),
-                                  0, bytes(10), 0, 0, bytes(3))
+                return FRAME.pack(0x45565036, 7, op, 0, 0, 0, bytes(16), bytes(16),
+                                  0, bytes(10), 0, 0, b'\x02\x00\x00')
 
             def connect():
                 nonlocal client, received
-                client, _ = server.accept()
-                client.settimeout(10)
-                received.clear()
-                client.sendall(frame(1) + frame(2))  # BEGIN / END
-                for kind in [2, 3]:
-                    client.sendall(FRAME.pack(0x45565036, 6, 13, kind, 1, 100,
-                                   socket.inet_pton(socket.AF_INET6, '2001:db8::2'),
-                                   socket.inet_pton(socket.AF_INET6, f'5f00:0:1:100:{kind-1}::'),
-                                   0, bytes(10), 0, 0, bytes(3)))
+                # Configuration changes may leave a closed connection in the
+                # listener backlog. Complete a snapshot handshake before using it.
+                while True:
+                    client, _ = server.accept()
+                    client.settimeout(10)
+                    received.clear()
+                    try:
+                        client.sendall(frame(1) + frame(2))  # BEGIN / END
+                        data = client.recv(FRAME.size)
+                        if not data:
+                            client.close()
+                            continue
+                        received.extend(data)
+                        for kind in [2, 3]:
+                            client.sendall(FRAME.pack(0x45565036, 7, 13, kind, 1, 100,
+                                           socket.inet_pton(socket.AF_INET6, '2001:db8::2'),
+                                           socket.inet_pton(socket.AF_INET6, f'5f00:0:1:100:{kind-1}::'),
+                                           0, bytes(10), 0, 0, b'\x02\x00\x00'))
+                        break
+                    except (BrokenPipeError, ConnectionResetError):
+                        client.close()
 
             def expect(op, add, key=None, flags=None, esi=ESI, vni=100):
                 until = time.monotonic() + 10
@@ -110,7 +122,7 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
                     while len(received) >= FRAME.size:
                         fields = FRAME.unpack(received[:FRAME.size])
                         del received[:FRAME.size]
-                        assert fields[:2] == (0x45565036, 6), fields
+                        assert fields[:2] == (0x45565036, 7), fields
                         if fields[2] != op or fields[4] != add or fields[5] != vni:
                             continue
                         if key is not None and fields[6][:6] != key:
@@ -153,9 +165,9 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
             sender.bind(('mh-wire', 0))
 
             def control(op, flags=0, peer='2001:db8::3'):
-                client.sendall(FRAME.pack(0x45565036, 6, op, 4, 1, 0, bytes(16),
+                client.sendall(FRAME.pack(0x45565036, 7, op, 4, 1, 0, bytes(16),
                                socket.inet_pton(socket.AF_INET6, peer), es[8], bytes(10),
-                               0, flags, bytes(3)))
+                               0, flags, b'\x02\x00\x00'))
 
             def inject(name, expect_delivery, origin='2001:db8::4', unicast=False, unknown=False, ether_type=0x88b5, target=MAC, next_header=143):
                 receiver.setblocking(False)
@@ -215,9 +227,9 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
 
             alias = bytes.fromhex('020000ff0002')
             def remote_mac(local=True, add=1, address=alias):
-                client.sendall(FRAME.pack(0x45565036, 6, 3, 2, add, 100,
+                client.sendall(FRAME.pack(0x45565036, 7, 3, 2, add, 100,
                                address + bytes(10), socket.inet_pton(socket.AF_INET6, '5f00:0:2:100:1::'),
-                               linux_bond if local else 0, bytes(10), 0, 1 if local else 0, bytes(3)))
+                               linux_bond if local else 0, bytes(10), 0, 1 if local else 0, b'\x02\x00\x00'))
             remote_mac(True)
             wait_for(lambda: '02:00:00:ff:00:02' in ctl('show l2fib verbose'))
             inject('same-es-alias-unicast-on-non-df', True, unicast=True, target=alias)
@@ -247,10 +259,10 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
             access.bind(('mh-host', 0))
             ctl('set ip neighbor host-mh-core 2001:db8:ffff::1 ' + sender.getsockname()[4].hex(':'))
             def program(op, identity=0, member=0, flags=0, peer='2001:db8::3', sid='5f00:0:2:100:1::'):
-                client.sendall(FRAME.pack(0x45565036, 6, op, 2, 1, 100 if op == 10 else member,
+                client.sendall(FRAME.pack(0x45565036, 7, op, 2, 1, 100 if op == 10 else member,
                                socket.inet_pton(socket.AF_INET6, peer) if op == 10 else bytes(16),
                                socket.inet_pton(socket.AF_INET6, sid if op == 10 else peer),
-                               identity, bytes(10), 0, flags, bytes(3)))
+                               identity, bytes(10), 0, flags, b'\x02\x00\x00'))
             program(10)
             program(10, peer='2001:db8::4', sid='5f00:0:3:100:1::')
             program(11, identity=101)
@@ -259,8 +271,8 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
             program(12, identity=201, member=101, flags=1)
             program(12, identity=201, member=102, flags=1)
             program(12, identity=201)
-            client.sendall(FRAME.pack(0x45565036, 6, 3, 2, 1, 100, remote + bytes(10),
-                           bytes(16), 201, bytes(10), 0, 2, bytes(3)))
+            client.sendall(FRAME.pack(0x45565036, 7, 3, 2, 1, 100, remote + bytes(10),
+                           bytes(16), 201, bytes(10), 0, 2, b'\x02\x00\x00'))
             wait_for(lambda: '02:00:00:ff:00:99' in ctl('show l2fib verbose'))
             def destinations(count=32, next_header=143):
                 wire.setblocking(False)
@@ -452,9 +464,9 @@ plugins {{ vat-path {directory} plugin default {{ disable }}
             tagged_mac = expect(4, 1, MAC, vni=101)
             assert tagged_mac[8] == tagged_es[8] == es[8]
             # A synchronized MAC selects the EVI's subinterface, not the parent.
-            client.sendall(FRAME.pack(0x45565036, 6, 3, 2, 1, 101, alias + bytes(10),
+            client.sendall(FRAME.pack(0x45565036, 7, 3, 2, 1, 101, alias + bytes(10),
                            socket.inet_pton(socket.AF_INET6, '5f00:0:2:101:1::'),
-                           tagged_es[8], bytes(10), 0, 1, bytes(3)))
+                           tagged_es[8], bytes(10), 0, 1, b'\x02\x00\x00'))
             wait_for(lambda: any('02:00:00:ff:00:02' in line and 'BondEthernet1.101' in line
                                  for line in ctl('show l2fib verbose').splitlines()))
             assert any('02:00:00:ff:00:01' in line and 'BondEthernet1.101' in line

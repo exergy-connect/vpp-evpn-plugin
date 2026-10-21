@@ -19,6 +19,7 @@
 #include <vnet/bonding/node.h>
 #include <vnet/feature/feature.h>
 #include <vnet/l2/l2_output.h>
+#include <vnet/l2/l2_fib.h>
 #include <vlib/unix/unix.h>
 
 static int zebra_fd = -1;
@@ -48,10 +49,14 @@ evi_for_vni (u32 vni)
 {
   evpn_evi_t *e;
   pool_foreach (e, evpn_main.evis)
-    if (e->vni == vni && evpn_srv6_service_exists (e->evi))
+    if (e->vni == vni)
       return e;
   return 0;
 }
+
+/* Track only Zebra-owned VXLAN state so reconnect never removes CLI/API state. */
+static struct evpn_srv6_msg *vxlan_routes;
+static int vxlan_route (evpn_evi_t *e, const struct evpn_srv6_msg *m);
 
 static void
 flush_remote (void)
@@ -61,6 +66,16 @@ flush_remote (void)
   pool_foreach (e, evpn_main.evis)
     if (evpn_srv6_service_exists (e->evi))
       evpn_srv6_flush (e->evi);
+  struct evpn_srv6_msg *m;
+  vec_foreach (m, vxlan_routes)
+    {
+      evpn_evi_t *e = evi_for_vni (clib_net_to_host_u32 (m->vni));
+      struct evpn_srv6_msg withdrawal = *m;
+      withdrawal.add = 0;
+      if (e)
+        vxlan_route (e, &withdrawal);
+    }
+  vec_reset_length (vxlan_routes);
   evpn_srv6_local_sid_reset ();
   evpn_srv6_control_reset ();
   vlib_worker_thread_barrier_release (evpn_main.vlib_main);
@@ -325,7 +340,7 @@ static void
 send_mac (evpn_local_mac_t *local, u8 add)
 {
   uword *index = hash_get (evpn_main.evi_by_id, local->evi);
-  if (!index || !evpn_srv6_service_exists (local->evi))
+  if (!index)
     return;
   evpn_evi_t *e = pool_elt_at_index (evpn_main.evis, index[0]);
   evpn_local_es_t *es = es_for_interface (local->evi, local->sw_if_index);
@@ -609,8 +624,7 @@ send_services (void)
 {
   evpn_evi_t *e;
   pool_foreach (e, evpn_main.evis)
-    if (evpn_srv6_service_exists (e->evi))
-      {
+    {
 	u8 *name = format (0, "vxlan%u%c", e->vni, 0);
 	u32 index = linux_index ((char *) name);
 	vec_free (name);
@@ -623,6 +637,7 @@ send_services (void)
 	  .magic = clib_host_to_net_u32 (EVPN_SRV6_MAGIC),
 	  .version = EVPN_SRV6_VERSION,
 	  .op = EVPN_SRV6_SERVICE,
+	  .type = evpn_srv6_service_exists (e->evi) ? EVPN_TRANSPORT_SRV6 : EVPN_TRANSPORT_VXLAN,
 	  .add = 1,
 	  .vni = clib_host_to_net_u32 (e->vni),
 	  .sw_if_index = clib_host_to_net_u32 (index),
@@ -630,12 +645,109 @@ send_services (void)
 	queue_local (&m);
       }
 }
+/* IPv4 uses mapped wire addresses; VPP ip46 stores IPv4 with a zero prefix. */
+static int
+vxlan_peer (const u8 wire[16], ip46_address_t *peer)
+{
+  static const u8 mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+  clib_memset (peer, 0, sizeof (*peer));
+  if (!memcmp (wire, mapped, 12))
+    clib_memcpy (&peer->ip4, wire + 12, 4);
+  else
+    clib_memcpy (&peer->ip6, wire, 16);
+  return ip46_address_is_zero (peer) ? -1 : 0;
+}
+
+static int
+vxlan_route (evpn_evi_t *e, const struct evpn_srv6_msg *m)
+{
+  ip46_address_t peer;
+  mac_address_t mac;
+  evpn_main_t *em = &evpn_main;
+  if (m->type == 3)
+    {
+      if (vxlan_peer (m->key, &peer))
+        return -1;
+      evpn_imet_t *imet;
+      pool_foreach (imet, em->imets)
+        if (imet->evi == e->evi && ip46_address_is_equal (&imet->remote, &peer))
+          return m->add ? 0 : evpn_imet_del (e->evi, &peer);
+      return m->add ? evpn_imet_add (e->evi, &peer) : 0;
+    }
+  if (m->type != 2 || m->flags > 1)
+    return -1;
+  mac_address_from_bytes (&mac, m->key);
+  evpn_mac_t *entry;
+  pool_foreach (entry, em->macs)
+    if (entry->evi == e->evi && !memcmp (&entry->mac, &mac, 6))
+      {
+        if (m->add && !m->flags && !vxlan_peer (m->sid, &peer) &&
+            ip46_address_is_equal (&entry->remote, &peer))
+          return 0;
+        int rv = evpn_mac_del (e->evi, &mac);
+        if (rv)
+          return rv;
+        break;
+      }
+  if (m->flags == 1)
+    {
+      u32 swi = vpp_for_linux (clib_net_to_host_u32 (m->sw_if_index), e->bd_index);
+      if (swi == ~0)
+        return -1;
+      if (!evpn_gw_mac_is_protected (e->evi, &mac))
+        {
+          if (m->add)
+            l2fib_add_entry (mac.bytes, e->bd_index, swi, L2FIB_ENTRY_RESULT_FLAG_STATIC);
+          else
+            l2fib_del_entry (mac.bytes, e->bd_index, swi);
+        }
+      return 0;
+    }
+  if (!m->add)
+    return 0;
+  return vxlan_peer (m->sid, &peer) ? -1 : evpn_mac_add (e->evi, &mac, 0, 0, 0, &peer);
+}
+
+static int
+vxlan_update (evpn_evi_t *e, const struct evpn_srv6_msg *m)
+{
+  uword i;
+  vec_foreach_index (i, vxlan_routes)
+    if (vxlan_routes[i].vni == m->vni && vxlan_routes[i].type == m->type &&
+        !memcmp (vxlan_routes[i].key, m->key, m->type == 2 ? 6 : 16))
+      break;
+  /* Remove an old local destination before a MAC move. */
+  if (i < vec_len (vxlan_routes) && vxlan_routes[i].flags == 1 && m->add)
+    {
+      struct evpn_srv6_msg old = vxlan_routes[i];
+      old.add = 0;
+      vxlan_route (e, &old);
+    }
+  int rv = vxlan_route (e, m);
+  if (rv)
+    return rv;
+  if (!m->add)
+    {
+      if (i < vec_len (vxlan_routes))
+        vec_del1 (vxlan_routes, i);
+    }
+  else if (i < vec_len (vxlan_routes))
+    vxlan_routes[i] = *m;
+  else
+    vec_add1 (vxlan_routes, *m);
+  return 0;
+}
+
 static int
 route_update (const struct evpn_srv6_msg *m)
 {
   evpn_evi_t *e = evi_for_vni (clib_net_to_host_u32 (m->vni));
   if (!e)
     return 0;
+  if (!evpn_srv6_service_exists (e->evi))
+    return m->transport == EVPN_TRANSPORT_VXLAN ? vxlan_update (e, m) : -1;
+  if (m->transport != EVPN_TRANSPORT_SRV6)
+    return -1;
   ip6_address_t sid, peer;
   mac_address_t mac;
   clib_memcpy (&sid, m->sid, 16);
@@ -680,7 +792,7 @@ receive_message (const struct evpn_srv6_msg *message)
       send_services ();
       reconcile_es (1);
       evpn_learn_replay ();
-      EVPN_NOTICE ("Zebra SRv6 dataplane connected; replaying local state");
+      EVPN_NOTICE ("Zebra EVPN dataplane connected; replaying local state");
       return 0;
     case EVPN_SRV6_LOCAL_SID:
       {
@@ -829,11 +941,11 @@ done:
     .write_function = zebra_write_ready,
     .error_function = zebra_error,
     .flags = UNIX_FILE_EVENT_EDGE_TRIGGERED,
-    .description = format (0, "evpn-zebra-srv6"),
+    .description = format (0, "evpn-zebra"),
   };
   zebra_fd = fd;
   zebra_file = clib_file_add (&file_main, &file);
-  EVPN_NOTICE ("ZEBRA native SRv6 control connected");
+  EVPN_NOTICE ("ZEBRA native EVPN control connected");
   return 0;
 }
 

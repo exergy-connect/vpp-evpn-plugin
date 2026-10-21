@@ -107,12 +107,12 @@ router bgp 65000
                     while len(data) < FRAME.size:
                         data.extend(sock.recv(FRAME.size - len(data)))
                     fields = FRAME.unpack(data)
-                    assert fields[:3] == (0x45565036, 6, op), fields
+                    assert fields[:3] == (0x45565036, 7, op), fields
                 return sock
 
             def send(op, add=1, up=1, vni=100):
                 name = f'vxlan{vni}' if op == 9 else 'BondEthernet1'
-                client.sendall(FRAME.pack(0x45565036, 6, op, 2 if op == 4 else 4, add, vni,
+                client.sendall(FRAME.pack(0x45565036, 7, op, 2 if op in (4, 9) else 4, add, vni,
                                          MAC + bytes(10) if op == 4 else bytes(16), bytes(16),
                                          socket.if_nametoindex(name), ESI if op == 6 else bytes(10),
                                          10, up if op == 6 else 0, bytes(3)))

@@ -2,10 +2,12 @@
 
 Programs **remote EVPN reachability** into VPP: bridge domains, L2FIB,
 neighbors, IP FIB, and refcounted VXLAN tunnels. BGP stays in a userspace
-control plane (FRR, BIRD, or a custom agent). That speaker translates Type-2 /
-Type-3 / Type-5 into this plugin’s CLI or binary API.
+control plane. Matching FRR builds program Type-2 / Type-3 through the
+native Zebra connection for both VXLAN and SRv6. VXLAN Type-5 routes use the
+existing kernel-route integration. BIRD or custom agents can use the CLI or
+binary API.
 
-**Version 0.4** — VLAN-based EVPN, symmetric IRB (RFC 7432 + RFC 9135),
+**Version 0.5** — VLAN-based EVPN, symmetric IRB (RFC 7432 + RFC 9135),
 FRR-style anycast IRB gateway, and dual-stack / IPv6-unnumbered Type-5
 (including RFC 8950-style IPv4-over-IPv6 overlay next hops).
 
@@ -20,6 +22,23 @@ FRR-style anycast IRB gateway, and dual-stack / IPv6-unnumbered Type-5
 Provision infrastructure first, then **register** it with the plugin
 (`evi` / `vrf` / `vtep`). Registration binds to existing objects; the plugin
 creates VXLAN and remote FIB/FDB state as routes are installed.
+
+## Native FRR integration
+
+Enable `evpn zebra enable [netns <path>]` after provisioning and registering
+services. An EVI with an `evpn srv6 service` uses SRv6; other registered EVIs
+use VXLAN. A single connection can carry both transports. Local MAC learning
+is reported for both, and remote Type-2/Type-3 updates call the corresponding
+transport's forwarding functions. VXLAN supports IPv4 and IPv6 VTEPs.
+
+FRR and the plugin must use matching protocol version 7 headers
+(`evpn_srv6_wire.h` and `zebra/zebra_evpn_srv6_wire.h`). Service registration
+carries the transport explicitly. VXLAN route messages carry VTEP addresses;
+SRv6 messages carry SIDs. Rebuild both components together.
+
+Zebra reconnect withdraws its VXLAN remote state and replays local MACs and
+services. Direct CLI/API state is independent. The existing SRv6 Ethernet
+Segment, DF and nexthop-group integration remains specific to SRv6.
 
 ## Datapath
 
@@ -88,19 +107,26 @@ Create these before `evpn evi` / `evpn vrf` / `evpn vtep`:
 2. **Per VLAN (EVI)** — bridge domain, access ports, optional IRB BVI +
    addresses (anycast VIP/MAC if used).  
 3. **Per tenant VRF** — IP table `T` (`ip table add` / `ip6 table add` as needed),
-   L3 BD `B` chosen by configuration, its BVI bound to `T`, and a donor loopback with a **per-PE tenant
-   /32** (and/or **/128**), then  
-   `set interface unnumbered bvi{B} use <donor-loopback>`.
-   Register with `evpn vrf add table T l3-vni V bd B`.
-   For **IPv6-unnumbered** (no IPv4 on the L3 BVI): put only a `/128` on the
-   donor loop, enable IPv6 on the L3 BVI (`set ip6 enable`, `ip6 table`), and
-   register with default `ipv4-nh-mode auto` so IPv4 Type-5 uses
-   `fd00:a9fe::` instead of `169.254`.  
+   L3 BD `B` chosen by configuration, and its BVI bound to `T` for each enabled
+   address family. Register with `evpn vrf add table T l3-vni V bd B`.
 
-The L3 BVI has no tenant IP of its own; VPP needs the donor in the same
-table. Use a dedicated tenant address on that loopback (e.g. `10.255.0.1/32`),
-not the underlay VTEP and not the anycast VIP. ICMP Time Exceeded on the L3
-hop sources that donor.
+The plugin registers existing infrastructure; it does not configure addresses,
+unnumbered donors, or IPv6 enablement. The lab configures the L3 BVI as
+unnumbered to a tenant IRB BVI with
+`set interface unnumbered <l3-bvi> use <tenant-irb-bvi>`.
+The donor can supply IPv4, IPv6, or both; a dedicated loopback is optional.
+
+For IPv4 Type-5 routes, `ipv4-nh-mode auto` checks whether the L3 BVI has an
+IPv4 address, including one borrowed through unnumbered. If it does, the plugin
+uses a synthetic `169.254.x.y` next hop; otherwise it uses `fd00:a9fe::xxxx`.
+This decision does not require an IPv6 `/128` on a donor. Configure the BVI's
+IPv6 table and enable IPv6 before using IPv6 next hops. `ipv4-nh-mode ipv6`
+selects IPv6 next hops even when the BVI has IPv4. IPv6 Type-5 routes always
+use IPv6 next hops.
+
+A dedicated donor loopback can provide a per-PE tenant `/32` and/or `/128`
+for locally generated traffic, such as ICMP Time Exceeded. Bind it to the
+same tenant table and configure the L3 BVI to borrow its addresses.
 
 For traceroute / peer source-validation, expose the donor through LCP into
 the Linux tenant VRF and let FRR advertise it as Type-5:
