@@ -847,7 +847,14 @@ receive_message (const struct evpn_srv6_msg *message)
 				      clib_net_to_host_u32 (message->vni));
 	  }
 	vlib_worker_thread_barrier_release (evpn_main.vlib_main);
-	return rv;
+        /* A dataplane operation failure is not a broken control stream.
+         * Disconnecting here flushes unrelated routes and replays the same
+         * failing operation indefinitely. Keep processing subsequent updates. */
+        if (rv)
+          EVPN_ERR ("Zebra EVPN operation %u type %u vni %u add %u failed rv=%d",
+                    message->op, message->type,
+                    clib_net_to_host_u32 (message->vni), message->add, rv);
+	return 0;
       }
     default:
       return -1;

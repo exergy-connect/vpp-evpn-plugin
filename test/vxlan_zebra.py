@@ -145,6 +145,16 @@ plugin vxlan_plugin.so {{ enable }} plugin af_packet_plugin.so {{ enable }} }}
                 wait_for(lambda: ('remote ' + peer) in ctl('show evpn mac'))
                 # Duplicate adds must be idempotent.
                 client.sendall(frame(3, 2, key=MAC + bytes(10), peer=address(peer)))
+            # An unusable VTEP must not tear down the control stream or
+            # flush unrelated MACs. A following valid move must still apply.
+            rejected_mac = bytes.fromhex('020000000099')
+            client.sendall(frame(3, 2, key=rejected_mac + bytes(10),
+                                 peer=address('fe80::1')))
+            client.sendall(frame(3, 2, key=MAC + bytes(10), peer=address('192.0.2.2')))
+            wait_for(lambda: 'remote 192.0.2.2' in ctl('show evpn mac'))
+            assert rejected_mac.hex(':') not in ctl('show evpn mac')
+            assert 'remote 192.0.2.2' in ctl('show evpn imet')
+            assert not select.select([server], [], [], .2)[0], 'operation failure reconnected Zebra'
             # Keep explicit API-owned IMET state across control disconnect.
             ctl('evpn imet add evi 100 remote 192.0.2.3')
             client.close()
