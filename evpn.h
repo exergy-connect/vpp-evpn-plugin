@@ -23,10 +23,7 @@
 #include <svm/queue.h>
 
 #define EVPN_PLUGIN_VERSION_MAJOR 0
-#define EVPN_PLUGIN_VERSION_MINOR 4
-
-/* L3-VNI BD id = base + fib table id (matches lab stub convention). */
-#define EVPN_L3_BD_BASE 10000
+#define EVPN_PLUGIN_VERSION_MINOR 5
 
 /* Synthetic overlay NH allocation ranges; unique per peer within a VRF. */
 #define EVPN_OVERLAY_NH_BASE 0xa9fe0000 /* 169.254.0.0 */
@@ -237,7 +234,8 @@ int evpn_evi_add (u32 evi, u32 vni, u32 bd_id, u8 irb,
 		  mac_address_t * router_mac_opt);
 int evpn_evi_del (u32 evi);
 
-int evpn_vrf_add (u32 table_id, u32 l3_vni, mac_address_t * router_mac_opt,
+int evpn_vrf_add (u32 table_id, u32 l3_vni, u32 bd_id,
+                  mac_address_t * router_mac_opt,
 		  evpn_ipv4_nh_mode_t ipv4_nh_mode);
 int evpn_vrf_del (u32 table_id);
 

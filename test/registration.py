@@ -19,8 +19,15 @@ def cli(command, fails=False):
     return result
 
 
+# The BD is required; there is no implicit table-id-derived default.
+missing_bd = subprocess.run(
+    ['docker', 'exec', container, 'vppctl', 'evpn vrf add table 1 l3-vni 50000'],
+    capture_output=True, text=True, check=True,
+).stdout
+assert 'bd required' in missing_bd, missing_bd
+
 cli('evpn evi add evi 10 vni 10010 bd 10 irb', fails=True)
-cli('evpn vrf add table 1 l3-vni 50000', fails=True)
+cli('evpn vrf add table 1 l3-vni 50000 bd 4096', fails=True)
 # Failed registration must not have created these objects.
 cli('create bridge-domain 10')
 cli('evpn evi add evi 10 vni 10010 bd 10 irb', fails=True)
@@ -37,12 +44,12 @@ cli('evpn evi add evi 10 vni 10010 bd 10 irb')
 cli('evpn evi del evi 10')
 
 cli('ip table add 1')
-cli('evpn vrf add table 1 l3-vni 50000', fails=True)
-cli('create bridge-domain 10001')
-cli('evpn vrf add table 1 l3-vni 50000', fails=True)
-cli('bvi create instance 10001')
-cli('set interface l2 bridge bvi10001 10001 bvi')
-cli('evpn vrf add table 1 l3-vni 50000', fails=True)
+cli('evpn vrf add table 1 l3-vni 50000 bd 4096', fails=True)
+cli('create bridge-domain 4096')
+cli('evpn vrf add table 1 l3-vni 50000 bd 4096', fails=True)
+cli('bvi create instance 4096')
+cli('set interface l2 bridge bvi4096 4096 bvi')
+cli('evpn vrf add table 1 l3-vni 50000 bd 4096', fails=True)
 cli('create loopback interface instance 0')
 cli('set interface ip address loop0 10.0.0.1/32')
 cli('set interface state loop0 up')
@@ -51,14 +58,14 @@ cli('set interface ip table loop10001 1')
 # Unique per-PE tenant /32 (not a copy of the underlay VTEP).
 cli('set interface ip address loop10001 10.255.0.1/32')
 cli('set interface state loop10001 up')
-cli('set interface ip table bvi10001 1')
-cli('set interface unnumbered bvi10001 use loop10001')
-cli('set interface state bvi10001 up')
-before = cli('show bridge-domain 10001 detail'), cli('show interface address'), cli('show ip fib')
-cli('evpn vrf add table 1 l3-vni 50000')
+cli('set interface ip table bvi4096 1')
+cli('set interface unnumbered bvi4096 use loop10001')
+cli('set interface state bvi4096 up')
+before = cli('show bridge-domain 4096 detail'), cli('show interface address'), cli('show ip fib')
+cli('evpn vrf add table 1 l3-vni 50000 bd 4096')
 cli('evpn vrf del table 1')
-assert before == (cli('show bridge-domain 10001 detail'), cli('show interface address'), cli('show ip fib'))
-cli('evpn vrf add table 1 l3-vni 50000')
+assert before == (cli('show bridge-domain 4096 detail'), cli('show interface address'), cli('show ip fib'))
+cli('evpn vrf add table 1 l3-vni 50000 bd 4096')
 cli('evpn vrf del table 1')
 print('PASS: prerequisite validation, MAC/binding checks, IPv4-only VRF, unregister preservation, and re-registration')
 
@@ -69,7 +76,7 @@ cli('evpn imet add evi 10 remote 10.0.0.2')
 cli('evpn evi del evi 10', fails=True)
 cli('evpn imet del evi 10 remote 10.0.0.2')
 cli('evpn evi del evi 10')
-cli('evpn vrf add table 1 l3-vni 50000')
+cli('evpn vrf add table 1 l3-vni 50000 bd 4096')
 cli('evpn prefix add table 1 172.16.20.0/24 remote 10.0.0.2 router-mac 02:00:00:00:00:02')
 cli('evpn vrf del table 1', fails=True)
 cli('evpn prefix del table 1 172.16.20.0/24')

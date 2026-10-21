@@ -122,6 +122,7 @@ vl_api_evpn_vrf_add_del_t_handler (vl_api_evpn_vrf_add_del_t * mp)
   mac_address_decode (mp->router_mac, &mac);
   if (mp->is_add)
     rv = evpn_vrf_add (ntohl (mp->table_id), ntohl (mp->l3_vni),
+                       ntohl (mp->bd_id),
 		       mac_address_is_zero (&mac) ? 0 : &mac,
 		       (evpn_ipv4_nh_mode_t) mp->ipv4_nh_mode);
   else

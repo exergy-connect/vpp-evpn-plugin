@@ -24,7 +24,7 @@ def wait_for_prefix(present):
     raise AssertionError(output)
 
 
-cli('evpn vrf add table 1 l3-vni 50000')
+cli('evpn vrf add table 1 l3-vni 50000 bd 4096')
 cli('evpn vtep add local 10.0.0.1 remote 10.0.0.3')
 cli('evpn learn enable')
 ip('link', 'add', 'evpn-test', 'type', 'dummy')

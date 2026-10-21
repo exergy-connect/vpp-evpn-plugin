@@ -70,7 +70,7 @@ static clib_error_t *
 evpn_vrf_command_fn (vlib_main_t * vm, unformat_input_t * input,
 		     vlib_cli_command_t * cmd)
 {
-  u32 table_id = ~0, l3_vni = ~0;
+  u32 table_id = ~0, l3_vni = ~0, bd_id = ~0;
   u8 is_add = 1;
   mac_address_t rmac;
   evpn_ipv4_nh_mode_t ipv4_nh_mode = EVPN_IPV4_NH_AUTO;
@@ -87,6 +87,8 @@ evpn_vrf_command_fn (vlib_main_t * vm, unformat_input_t * input,
       else if (unformat (input, "table %u", &table_id))
 	;
       else if (unformat (input, "l3-vni %u", &l3_vni))
+	;
+      else if (unformat (input, "bd %u", &bd_id))
 	;
       else if (unformat (input, "router-mac %U", unformat_mac_address_t, &rmac))
 	;
@@ -108,7 +110,9 @@ evpn_vrf_command_fn (vlib_main_t * vm, unformat_input_t * input,
     {
       if (l3_vni == ~0)
 	return clib_error_return (0, "l3-vni required");
-      rv = evpn_vrf_add (table_id, l3_vni,
+      if (bd_id == ~0)
+        return clib_error_return (0, "bd required");
+      rv = evpn_vrf_add (table_id, l3_vni, bd_id,
 			 mac_address_is_zero (&rmac) ? 0 : &rmac,
 			 ipv4_nh_mode);
     }
@@ -123,7 +127,7 @@ evpn_vrf_command_fn (vlib_main_t * vm, unformat_input_t * input,
 VLIB_CLI_COMMAND (evpn_vrf_command, static) = {
   .path = "evpn vrf",
   .short_help =
-    "evpn vrf add table <id> l3-vni <n> [router-mac <mac>] [ipv4-nh-mode auto|ipv4|ipv6] | del table <id>",
+    "evpn vrf add table <id> l3-vni <n> bd <id> [router-mac <mac>] [ipv4-nh-mode auto|ipv4|ipv6] | del table <id>",
   .function = evpn_vrf_command_fn,
 };
 

@@ -912,17 +912,18 @@ evpn_evi_del (u32 evi)
 }
 
 int
-evpn_vrf_add (u32 table_id, u32 l3_vni, mac_address_t *router_mac_opt,
+evpn_vrf_add (u32 table_id, u32 l3_vni, u32 bd_id,
+              mac_address_t *router_mac_opt,
 	      evpn_ipv4_nh_mode_t ipv4_nh_mode)
 {
   evpn_main_t *em = &evpn_main;
-  u32 bd_id, bd_index, swi;
+  u32 bd_index, swi;
   mac_address_t mac;
   evpn_vrf_t *v;
   evpn_feature_init (em);
   if (hash_get (em->vrf_by_table, table_id))
     return VNET_API_ERROR_VALUE_EXIST;
-  if (table_id > ~0u - EVPN_L3_BD_BASE)
+  if (bd_id == ~0u)
     return VNET_API_ERROR_INVALID_VALUE;
   u32 fib4 = fib_table_find (FIB_PROTOCOL_IP4, table_id);
   u32 fib6 = fib_table_find (FIB_PROTOCOL_IP6, table_id);
@@ -931,7 +932,6 @@ evpn_vrf_add (u32 table_id, u32 l3_vni, mac_address_t *router_mac_opt,
       EVPN_ERR ("table %u must exist before VRF registration", table_id);
       return VNET_API_ERROR_NO_SUCH_ENTRY;
     }
-  bd_id = EVPN_L3_BD_BASE + table_id;
   int rv = evpn_existing_bd (bd_id, 1, &bd_index, &swi, &mac, router_mac_opt);
   if (rv)
     return rv;

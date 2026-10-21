@@ -35,7 +35,7 @@ Same-subnet traffic: access → BD → L2FIB → L2 VNI → remote leaf.
 ### Symmetric IRB (Type-5)
 
 Each tenant VRF has an IP table and an L3-VNI bridge domain
-`bd = 10000 + table_id` with its BVI (unique **router MAC** per PE).
+`bd` supplied explicitly at registration, with its BVI (unique **router MAC** per PE).
 
 Type-5 installs:
 
@@ -88,9 +88,10 @@ Create these before `evpn evi` / `evpn vrf` / `evpn vtep`:
 2. **Per VLAN (EVI)** — bridge domain, access ports, optional IRB BVI +
    addresses (anycast VIP/MAC if used).  
 3. **Per tenant VRF** — IP table `T` (`ip table add` / `ip6 table add` as needed),
-   L3 BD `10000+T`, L3 BVI bound to `T`, `loop{10000+T}` with a **per-PE tenant
+   L3 BD `B` chosen by configuration, its BVI bound to `T`, and a donor loopback with a **per-PE tenant
    /32** (and/or **/128**), then  
-   `set interface unnumbered bvi{10000+T} use loop{10000+T}`.  
+   `set interface unnumbered bvi{B} use <donor-loopback>`.
+   Register with `evpn vrf add table T l3-vni V bd B`.
    For **IPv6-unnumbered** (no IPv4 on the L3 BVI): put only a `/128` on the
    donor loop, enable IPv6 on the L3 BVI (`set ip6 enable`, `ip6 table`), and
    register with default `ipv4-nh-mode auto` so IPv4 Type-5 uses
@@ -128,7 +129,7 @@ Leave tunnel creation to the plugin: do not pre-create the same
 | Command | Effect |
 | --- | --- |
 | `evpn evi add evi <id> vni <n> bd <id> [irb] [router-mac <mac>]` | Bind EVI to BD (+ BVI if `irb`). Optional `router-mac` must match the BVI. |
-| `evpn vrf add table <id> l3-vni <n> [router-mac <mac>] [ipv4-nh-mode auto\|ipv4\|ipv6]` | Bind VRF to table, BD `10000+id`, L3 BVI; lock the IP table(s). Default `ipv4-nh-mode auto`. |
+| `evpn vrf add table <id> l3-vni <n> bd <id> [router-mac <mac>] [ipv4-nh-mode auto\|ipv4\|ipv6]` | Bind VRF to the configured table, BD, and its existing L3 BVI; lock the IP table(s). Default `ipv4-nh-mode auto`. |
 | `evpn vtep add local <ip> remote <ip> [encap-table <id>] [dst_port <n>]` | Underlay endpoints for tunnel create (default UDP **4789**). |
 | `evpn mac add evi <id> mac <mac> [ip <addr>] remote <vtep>` | Type-2: VXLAN + L2FIB; optional neighbor on IRB BVI (skipped for local GW). |
 | `evpn imet add evi <id> remote <vtep>` | Type-3: VXLAN on BD flood list. |

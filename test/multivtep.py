@@ -7,7 +7,7 @@ Runs registration checks first to provision the borrowed infrastructure.
 from registration import cli
 import re
 
-cli('evpn vrf add table 1 l3-vni 50000')
+cli('evpn vrf add table 1 l3-vni 50000 bd 4096')
 
 
 def add(prefix, remote, mac):
