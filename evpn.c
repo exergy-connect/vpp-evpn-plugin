@@ -1151,7 +1151,7 @@ evpn_mac_add (u32 evi, mac_address_t * mac, ip46_address_t * ip_opt,
   /* Attach tunnel to EVI BD if not already (set_int_l2_mode is idempotent
    * enough for our purposes). */
   set_int_l2_mode (em->vlib_main, em->vnet_main, MODE_L2_BRIDGE, swi,
-		   e->bd_index, L2_BD_PORT_TYPE_NORMAL, 0, 0);
+		   e->bd_index, L2_BD_PORT_TYPE_NORMAL, 1, 0);
 
   l2fib_add_entry (mac->bytes, e->bd_index, swi,
 		   L2FIB_ENTRY_RESULT_FLAG_STATIC);
@@ -1285,9 +1285,10 @@ evpn_imet_add (u32 evi, ip46_address_t * remote)
       return rv;
     }
 
-  /* Member of BD → participates in flood list (BUM / Type-3). */
+  /* All overlay ports share a nonzero split-horizon group: BUM received
+   * from a remote VTEP must never be replicated back into the overlay. */
   set_int_l2_mode (em->vlib_main, em->vnet_main, MODE_L2_BRIDGE, swi,
-		   e->bd_index, L2_BD_PORT_TYPE_NORMAL, 0, 0);
+		   e->bd_index, L2_BD_PORT_TYPE_NORMAL, 1, 0);
 
   pool_get (em->imets, im);
   clib_memset (im, 0, sizeof (*im));
@@ -1409,7 +1410,7 @@ evpn_prefix_add (u32 table_id, fib_prefix_t * pfx, ip46_address_t * remote,
     }
 
   set_int_l2_mode (em->vlib_main, em->vnet_main, MODE_L2_BRIDGE, swi,
-		   v->bd_index, L2_BD_PORT_TYPE_NORMAL, 0, 0);
+		   v->bd_index, L2_BD_PORT_TYPE_NORMAL, 1, 0);
 
   /* Remote router MAC → L2FIB on L3-VNI BD */
   l2fib_add_entry (router_mac->bytes, v->bd_index, swi,
